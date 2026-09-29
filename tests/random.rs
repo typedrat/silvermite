@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Rng, Solver, check_solution};
-use silvermite::{Capacity, Error, NodeId, Number, Problem, SupplyType};
+use silvermite::{Capacity, Error, NetworkSimplex, NodeId, Number, PivotRule, Problem, SupplyType};
 
 /// A small random instance mixing lower bounds (some negative), infinite
 /// capacities, negative costs, self-loops, parallel arcs, and all three
@@ -127,4 +127,105 @@ fn random_i32() {
 #[test]
 fn random_negative_infinite_arcs() {
     cross_check::<i64>(3, 1000, true);
+}
+
+/// Guesses for a warm start: the optimum, the optimum perturbed, zero flow,
+/// and random flows that often break the bounds and leave nodes unbalanced.
+fn guesses<T: Number>(rng: &mut Rng, p: &Problem<T, T>, optimum: Option<&[T]>) -> Vec<Vec<T>> {
+    let t = |x: i64| T::from_i128(x as i128);
+    let random = |rng: &mut Rng| -> Vec<T> {
+        p.arcs()
+            .map(|a| {
+                let lower = p.lower(a).to_i128() as i64;
+                let upper = p
+                    .upper(a)
+                    .finite()
+                    .map_or(lower + 30, |u| u.to_i128() as i64);
+                t(rng.range(lower - 3, upper + 3))
+            })
+            .collect()
+    };
+    let mut guesses = vec![vec![T::zero(); p.arc_count()], random(rng), random(rng)];
+    if let Some(optimum) = optimum {
+        guesses.push(optimum.to_vec());
+        guesses.push(
+            optimum
+                .iter()
+                .map(|&f| {
+                    if rng.chance(0.3) {
+                        f + t(rng.range(-3, 3))
+                    } else {
+                        f
+                    }
+                })
+                .collect(),
+        );
+    }
+    guesses
+}
+
+fn warm_check<T: Number>(seed: u64, count: usize, allow_negative_infinite: bool) {
+    let mut rng = Rng::new(seed);
+    let rules = [
+        PivotRule::FirstEligible,
+        PivotRule::BestEligible,
+        PivotRule::BlockSearch,
+        PivotRule::CandidateList,
+        PivotRule::AlteringList,
+    ];
+    for case in 0..count {
+        let (p, _) = random_problem::<T>(&mut rng, allow_negative_infinite);
+        let cold = NetworkSimplex::new().solve(&p);
+        let reference = outcome(&cold);
+        let guesses = guesses(&mut rng, &p, cold.as_ref().ok().map(|s| s.flows()));
+        for (g, guess) in guesses.iter().enumerate() {
+            for rule in rules {
+                for mixing in [true, false] {
+                    let mut solver = NetworkSimplex::new().pivot_rule(rule).arc_mixing(mixing);
+                    let result = solver.solve_from(&p, guess);
+                    let context =
+                        || format!("seed {seed} case {case} guess {g} {rule:?} mixing {mixing}");
+                    if let Ok(s) = &result {
+                        check_solution(&p, s)
+                            .unwrap_or_else(|e| panic!("{}: {e}\n{p:?}", context()));
+                    }
+                    assert_eq!(
+                        outcome(&result),
+                        reference,
+                        "{}\n{guess:?}\n{p:?}",
+                        context()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn warm_start_i64() {
+    warm_check::<i64>(4, 1000, false);
+}
+
+#[test]
+fn warm_start_i32() {
+    warm_check::<i32>(5, 300, false);
+}
+
+#[test]
+fn warm_start_negative_infinite_arcs() {
+    warm_check::<i64>(6, 300, true);
+}
+
+/// Solving from a flow that is already optimal must not move it.
+#[test]
+fn warm_start_from_unique_optimum() {
+    let mut p = Problem::<i64, i64>::new(0);
+    let [s, a, b, t] = [5, 0, 0, -5].map(|supply| p.add_node(supply));
+    p.add_arc(s, a, 0, 3, 1);
+    p.add_arc(a, t, 0, Capacity::Infinite, 1);
+    p.add_arc(s, b, 0, Capacity::Infinite, 2);
+    p.add_arc(b, t, 0, 4, 2);
+    let optimum = [3, 3, 2, 2];
+    let solution = NetworkSimplex::new().solve_from(&p, &optimum).unwrap();
+    assert_eq!(solution.flows(), &optimum);
 }

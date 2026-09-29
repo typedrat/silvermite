@@ -16,6 +16,7 @@ use self::pivot_rules::{
 use crate::ivec::{ArcIx, IVec, Idx, NodeIx};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
+mod from_flow;
 mod pivot_rules;
 mod setup;
 mod tree;
@@ -220,6 +221,55 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
     /// Solves `problem`, returning an optimal flow and optimal potentials.
     pub fn solve(&mut self, problem: &Problem<V, C>) -> Result<Solution<V, C>, Error> {
+        self.run(problem, None)
+    }
+
+    /// Solves `problem` starting from `flow`, a guess at the optimal flow
+    /// indexed by [`ArcId::index`](crate::ArcId::index), such as a greedy
+    /// heuristic's answer or the solution to a similar problem.
+    ///
+    /// The result is optimal whatever the guess; a good guess only makes the
+    /// solve faster. The guess need not be feasible: flows outside their
+    /// arc's bounds are clamped into them, and the solver reroutes what the
+    /// guess leaves unbalanced. The closer the guess is to a feasible flow,
+    /// the more of it survives as the starting point.
+    ///
+    /// ```
+    /// use silvermite::{NetworkSimplex, Problem};
+    ///
+    /// let mut p = Problem::<i64, i64>::new(0);
+    /// let [s, a, b, t] = [4, 0, 0, -4].map(|supply| p.add_node(supply));
+    /// p.add_arc(s, a, 0, 4, 1);
+    /// p.add_arc(a, t, 0, 4, 1);
+    /// p.add_arc(s, b, 0, 4, 2);
+    /// p.add_arc(b, t, 0, 4, 2);
+    ///
+    /// // Greedy guess: split the supply evenly between the two routes.
+    /// let solution = NetworkSimplex::new().solve_from(&p, &[2, 2, 2, 2]).unwrap();
+    /// assert_eq!(solution.flows(), &[4, 4, 0, 0]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// If `flow` does not have one entry per arc of `problem`.
+    pub fn solve_from(
+        &mut self,
+        problem: &Problem<V, C>,
+        flow: &[V],
+    ) -> Result<Solution<V, C>, Error> {
+        assert_eq!(
+            flow.len(),
+            problem.arc_count(),
+            "initial flow length does not match the arc count"
+        );
+        self.run(problem, Some(flow))
+    }
+
+    fn run(
+        &mut self,
+        problem: &Problem<V, C>,
+        guess: Option<&[V]>,
+    ) -> Result<Solution<V, C>, Error> {
         problem.validate(2)?;
         let n = problem.node_count();
         if n == 0 {
@@ -231,7 +281,13 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         }
 
         self.load(problem);
-        self.init()?;
+        match guess {
+            None => {
+                self.init()?;
+                self.initial_pivots()?;
+            }
+            Some(guess) => self.init_from_flow(guess)?,
+        }
         match self.pivot_rule {
             PivotRule::FirstEligible => self.start::<FirstEligible>()?,
             PivotRule::BestEligible => self.start::<BestEligible>()?,
@@ -258,9 +314,6 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
     fn start<P: Pivot<C>>(&mut self) -> Result<(), Error> {
         let mut pivot = P::new(self.search_arc_num);
-
-        self.initial_pivots()?;
-
         loop {
             let view = PivotView {
                 source: &self.source,

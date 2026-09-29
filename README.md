@@ -43,6 +43,12 @@ order, and upper bounds are a `Capacity`, which plain numbers convert into.
 Solver instances keep their buffers between calls to `solve`, so reuse one
 when solving many problems.
 
+`NetworkSimplex::solve_from` takes a guess at the flow, such as a greedy
+heuristic's answer or the solution to a similar earlier problem, and starts
+pivoting from it rather than from scratch. The guess need not be feasible;
+the result is optimal either way. A guess near the optimum cuts the pivot
+count sharply, but a poor one saves little, so measure before relying on it.
+
 The crate is plain safe Rust, `no_std` (it needs only `alloc`), and works on
 32-bit targets, including `wasm32-unknown-unknown`; the test suite passes on
 `wasm32-wasip1`.
@@ -71,6 +77,8 @@ relabel steps, with these exceptions:
      array, which is an out-of-bounds write in C++ (reproducible with
      `-D_GLIBCXX_ASSERTIONS` and `Method::Augment`).
 - `CostScaling` supports `SupplyType::Leq` by solving the mirrored problem.
+- `NetworkSimplex` can start from a caller's flow (`solve_from`), which
+  LEMON has no entry point for.
 - An empty problem is solved (to an empty flow) instead of being reported
   infeasible.
 - Inputs are validated: inconsistent bounds return `Error::InvalidBounds`,
@@ -87,7 +95,9 @@ relabel steps, with these exceptions:
 - `tests/random.rs` cross-checks all eight solver configurations on 5,000
   random instances with lower bounds, infinite capacities, negative costs,
   self-loops, and all supply regimes, verifying every optimal solution's
-  primal feasibility, complementary slackness, and dual objective.
+  primal feasibility, complementary slackness, and dual objective. It also
+  warm-starts every pivot rule on 1,600 of them from the optimum, a perturbed
+  optimum, zero flow, and random out-of-bounds flows.
 - `tools/compare.py` runs the solvers against a C++ build of LEMON
   (`tools/lemon-ref`) on generated instances and on the benchmark suite.
 - `tools/ab_builds.py` compares two builds of `solve_dimacs`, by interleaved

@@ -63,7 +63,42 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         self.stype = p.supply_type;
     }
 
+    /// Builds the starting basis where every node hangs directly off the
+    /// artificial root.
     pub(super) fn init(&mut self) -> Result<(), Error> {
+        self.prepare()?;
+        let n = self.node_num;
+        let m = self.arc_num;
+        let arcs = ..ArcIx::new(m);
+        let root = self.root;
+
+        self.flow[arcs].fill(V::zero());
+        self.state[arcs].fill(ArcState::Lower);
+
+        // Thread order 0, 1, ..., n - 1. The root has no pred arc, so its
+        // pred entry is never read.
+        let first = NodeIx::new(0);
+        self.succ_num.fill(1);
+        self.succ_num[root] = n as u32 + 1;
+        self.thread[root] = first;
+        self.rev_thread[first] = root;
+        self.last_succ[root] = root.prev();
+
+        let mut next_extra = ArcIx::new(m + n);
+        for u in first_ids::<NodeIx>(n) {
+            self.thread[u] = u.next();
+            self.rev_thread[u.next()] = u;
+            self.last_succ[u] = u;
+            self.link_to_root(u, self.supply[u], &mut next_extra);
+        }
+        self.all_arc_num = next_extra.index();
+
+        Ok(())
+    }
+
+    /// Checks the supply type, shifts out lower bounds, and sets up the
+    /// root, leaving the spanning tree and the flow to the caller.
+    pub(super) fn prepare(&mut self) -> Result<(), Error> {
         let n = self.node_num;
         let m = self.arc_num;
         let arcs = ..ArcIx::new(m);
@@ -106,67 +141,68 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             self.cap[arcs].copy_from_slice(&self.upper[arcs]);
         }
 
-        // Large enough that no optimal basis uses an artificial arc with
-        // flow unless the problem is infeasible.
-        let art_cost = C::max_value() / C::from_i8(2) + C::one();
-
-        self.flow[arcs].fill(V::zero());
-        self.state[arcs].fill(ArcState::Lower);
-
-        // Start from the tree where every node hangs directly off the
-        // artificial root, in thread order 0, 1, ..., n - 1. The root has no
-        // pred arc, so its pred entry is never read.
-        let first = NodeIx::new(0);
-        self.parent.fill(root);
-        self.succ_num.fill(1);
-        self.succ_num[root] = n as u32 + 1;
-        self.thread[root] = first;
-        self.rev_thread[first] = root;
-        self.last_succ[root] = root.prev();
+        self.parent[root] = root;
         self.supply[root] = -self.sum_supply;
         self.pi[root] = C::zero();
+        self.search_arc_num = if self.has_slack() { m + n } else { m };
+        Ok(())
+    }
 
-        // Join each node to the root by an artificial tree arc carrying its
-        // supply: upwards for supply, downwards for demand. Tree arcs in the
-        // direction the supply constraints do not allow slack in cost
-        // `art_cost`, so the optimum drains them. With GEQ/LEQ constraints,
-        // each costly tree arc gets a free non-tree twin in the other
-        // direction, which the pivots search to absorb the slack.
-        let has_slack = self.sum_supply != V::zero();
-        let costly = if self.sum_supply < V::zero() {
+    /// Whether the supply constraints allow slack, i.e. are inequalities.
+    fn has_slack(&self) -> bool {
+        self.sum_supply != V::zero()
+    }
+
+    /// The direction of the artificial tree arcs that cost `art_cost`: the
+    /// one the supply constraints do not allow slack in.
+    fn costly_dir(&self) -> Dir {
+        if self.sum_supply < V::zero() {
+            Dir::Up
+        } else {
+            Dir::Down
+        }
+    }
+
+    /// Hangs `u` directly off the root by an artificial tree arc carrying
+    /// `excess`, the net flow `u`'s subtree sends to the root: upwards when
+    /// positive, downwards when negative.
+    ///
+    /// Arcs in the costly direction cost enough that no optimal basis uses
+    /// one with flow unless the problem is infeasible. With GEQ/LEQ
+    /// constraints, each costly tree arc gets a free non-tree twin in the
+    /// other direction, which the pivots search to absorb the slack; costly
+    /// arcs themselves go past the searched range, at `next_extra`.
+    pub(super) fn link_to_root(&mut self, u: NodeIx, excess: V, next_extra: &mut ArcIx) {
+        let costly = self.costly_dir();
+        let dir = if excess > V::zero() || (excess == V::zero() && costly == Dir::Down) {
             Dir::Up
         } else {
             Dir::Down
         };
-        self.search_arc_num = if has_slack { m + n } else { m };
-        let mut next_extra = ArcIx::new(m + n);
-        for u in first_ids::<NodeIx>(n) {
-            self.thread[u] = u.next();
-            self.rev_thread[u.next()] = u;
-            self.last_succ[u] = u;
-
-            let supply = self.supply[u];
-            let dir = if supply > V::zero() || (supply == V::zero() && costly == Dir::Down) {
-                Dir::Up
-            } else {
-                Dir::Down
-            };
-            let cost = if dir == costly { art_cost } else { C::zero() };
-            let mut e = ArcIx::new(m + u.index());
-            if has_slack && dir == costly {
-                self.set_artificial(e, u, dir.reversed(), V::zero(), C::zero(), ArcState::Lower);
-                e = next_extra;
-                next_extra = next_extra.next();
-            }
-            let flow = dir.sign::<V>() * supply;
-            self.set_artificial(e, u, dir, flow, cost, ArcState::Tree);
-            self.pred[u] = e;
-            self.pred_dir[u] = dir;
-            self.pi[u] = -dir.sign::<C>() * cost;
+        let cost = if dir == costly {
+            C::max_value() / C::from_i8(2) + C::one()
+        } else {
+            C::zero()
+        };
+        let mut e = ArcIx::new(self.arc_num + u.index());
+        if self.has_slack() && dir == costly {
+            self.set_artificial(e, u, dir.reversed(), V::zero(), C::zero(), ArcState::Lower);
+            e = *next_extra;
+            *next_extra = next_extra.next();
         }
-        self.all_arc_num = if has_slack { next_extra.index() } else { m + n };
+        self.set_artificial(e, u, dir, dir.sign::<V>() * excess, cost, ArcState::Tree);
+        self.parent[u] = self.root;
+        self.pred[u] = e;
+        self.pred_dir[u] = dir;
+        self.pi[u] = -dir.sign::<C>() * cost;
+    }
 
-        Ok(())
+    /// Leaves `u`'s artificial arc out of the tree, for a node that joins it
+    /// through an original arc instead.
+    pub(super) fn leave_unlinked(&mut self, u: NodeIx) {
+        let e = ArcIx::new(self.arc_num + u.index());
+        let dir = self.costly_dir().reversed();
+        self.set_artificial(e, u, dir, V::zero(), C::zero(), ArcState::Lower);
     }
 
     /// Sets up the infinite-capacity artificial arc `e` between node `u` and

@@ -34,7 +34,7 @@
 //!
 //! Flow and cost types are any signed primitive integers (see [`Number`]).
 //!
-//! With the `petgraph` feature, the [`petgraph`](crate::petgraph) module
+//! With the `petgraph` feature, the [`petgraph`] module
 //! builds problems from petgraph graphs.
 //!
 //! The crate is `no_std` and needs only `alloc`.

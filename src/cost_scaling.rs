@@ -382,11 +382,13 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let real_arcs = ..root_arcs;
         let alpha = self.alpha;
         let scale = res_node_num as i128 * alpha as i128;
+        // At least 1, so the scale itself must fit too.
         let max_abs_cost = self.scost[real_arcs]
             .iter()
             .map(|&c| c.to_i128().abs())
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(1);
         if max_abs_cost
             .checked_mul(scale)
             .is_none_or(|c| c > L::max_value().to_i128())

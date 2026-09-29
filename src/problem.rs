@@ -246,7 +246,8 @@ pub enum Error {
     #[error("the problem has too many nodes or arcs")]
     TooLarge,
     /// Cost scaling's internal costs (arc costs multiplied by the node count
-    /// and scaling factor) do not fit in its large cost type. Use a wider
+    /// and scaling factor), or that multiplier itself, do not fit in its
+    /// large cost type. Use a wider
     /// large cost type, such as `CostScaling<V, C, i128>`.
     #[error("scaled arc costs overflow the large cost type")]
     Overflow,

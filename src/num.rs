@@ -10,10 +10,13 @@ use num_traits::{AsPrimitive, NumAssign, PrimInt, Signed};
 /// means `i8` through `i128` and `isize`. Floating-point types are excluded
 /// on purpose: the solvers rely on exact arithmetic, and `max_value()`
 /// doubles as the "infinite capacity" marker.
+///
+/// Every conversion into a `Number` requires the value to fit: debug builds
+/// panic if it does not, and release builds truncate like `as`.
 pub trait Number:
     PrimInt + Signed + NumAssign + Hash + Default + Debug + Display + Send + Sync + 'static
 {
-    /// Converts with `as` semantics (truncating on overflow).
+    /// Converts `v`, which must fit in `Self`.
     fn from_i128(v: i128) -> Self;
 
     fn to_i128(self) -> i128;
@@ -28,7 +31,7 @@ pub trait Number:
         Self::from_i128(v as i128)
     }
 
-    /// Converts between number types with `as` semantics.
+    /// Converts to another number type, which must be able to hold the value.
     #[inline(always)]
     fn cast<T: Number>(self) -> T {
         T::from_i128(self.to_i128())
@@ -52,7 +55,13 @@ where
 {
     #[inline(always)]
     fn from_i128(v: i128) -> Self {
-        v.as_()
+        let t: T = v.as_();
+        debug_assert!(
+            t.as_() == v,
+            "{v} does not fit in {}",
+            core::any::type_name::<T>()
+        );
+        t
     }
 
     #[inline(always)]

@@ -95,12 +95,16 @@ impl Dir {
     }
 }
 
-/// Which side of the pivot cycle the leaving arc is on, relative to the
-/// direction flow is pushed around it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
-    First,
-    Second,
+/// The tree arc a pivot removes, and how the entering arc replaces it.
+#[derive(Clone, Copy)]
+struct Exchange {
+    /// The entering arc's endpoint in the subtree cut off by removing the
+    /// leaving arc.
+    u_in: NodeId,
+    /// The entering arc's other endpoint, which becomes `u_in`'s parent.
+    v_in: NodeId,
+    /// The child end of the leaving arc.
+    u_out: NodeId,
 }
 
 /// Network simplex solver for minimum cost flow.
@@ -162,15 +166,6 @@ pub struct NetworkSimplex<V, C> {
     state: IVec<ArcId, ArcState>,
     dirty_revs: Vec<NodeId>,
     root: NodeId,
-
-    // Current pivot
-    in_arc: ArcId,
-    join: NodeId,
-    u_in: NodeId,
-    v_in: NodeId,
-    u_out: NodeId,
-    v_out: NodeId,
-    delta: V,
 }
 
 impl<V: Number, C: Number> Default for NetworkSimplex<V, C> {
@@ -211,13 +206,6 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             state: IVec::slot(16),
             dirty_revs: Vec::new(),
             root: NodeId::default(),
-            in_arc: ArcId::default(),
-            join: NodeId::default(),
-            u_in: NodeId::default(),
-            v_in: NodeId::default(),
-            u_out: NodeId::default(),
-            v_out: NodeId::default(),
-            delta: V::zero(),
         }
     }
 
@@ -452,13 +440,13 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             * (self.cost[e] + self.pi[self.source[e]] - self.pi[self.target[e]])
     }
 
-    fn find_join_node(&mut self) {
-        let source = self.source.as_ref();
-        let target = self.target.as_ref();
+    /// The nearest common ancestor of `in_arc`'s endpoints, where the cycle
+    /// it closes in the tree turns around.
+    fn find_join_node(&self, in_arc: ArcId) -> NodeId {
         let succ_num = self.succ_num.as_ref();
         let parent = self.parent.as_ref();
-        let mut u = source[self.in_arc];
-        let mut v = target[self.in_arc];
+        let mut u = self.source[in_arc];
+        let mut v = self.target[in_arc];
         // The root's subtree is the largest, so only a non-root node ever
         // steps up.
         while u != v {
@@ -468,13 +456,13 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 v = parent[v];
             }
         }
-        self.join = u;
+        u
     }
 
-    /// Finds the leaving arc of the cycle closed by the entering arc.
-    /// Returns false if the entering arc itself leaves (it just flips
-    /// between its bounds).
-    fn find_leaving_arc(&mut self) -> bool {
+    /// Finds how much flow can be pushed around the cycle `in_arc` closes,
+    /// and which arc blocks it. The exchange is `None` when `in_arc` blocks
+    /// itself, so it only moves to its other bound.
+    fn find_leaving_arc(&self, in_arc: ArcId, join: NodeId) -> (V, Option<Exchange>) {
         let state = self.state.as_ref();
         let source = self.source.as_ref();
         let target = self.target.as_ref();
@@ -486,9 +474,6 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let inf = V::max_value();
         let max = V::max_value();
 
-        let in_arc = self.in_arc;
-        let join = self.join;
-
         // Orient the cycle along the direction flow will be pushed.
         let (first, second) = if state[in_arc] == ArcState::Lower {
             (source[in_arc], target[in_arc])
@@ -496,8 +481,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             (target[in_arc], source[in_arc])
         };
         let mut delta = cap[in_arc];
-        let mut u_out = self.u_out;
-        let mut leaving = None;
+        let mut exchange = None;
 
         // How far flow can be pushed along the pred arc of `u` when the
         // cycle runs through it in direction `along`.
@@ -516,8 +500,11 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             let d = residual(u, Dir::Up);
             if d < delta {
                 delta = d;
-                u_out = u;
-                leaving = Some(Side::First);
+                exchange = Some(Exchange {
+                    u_in: first,
+                    v_in: second,
+                    u_out: u,
+                });
             }
         }
 
@@ -527,22 +514,19 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             let d = residual(u, Dir::Down);
             if d <= delta {
                 delta = d;
-                u_out = u;
-                leaving = Some(Side::Second);
+                exchange = Some(Exchange {
+                    u_in: second,
+                    v_in: first,
+                    u_out: u,
+                });
             }
         }
-        self.delta = delta;
-        self.u_out = u_out;
 
-        (self.u_in, self.v_in) = if leaving == Some(Side::First) {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        leaving.is_some()
+        (delta, exchange)
     }
 
-    fn change_flow(&mut self, change: bool) {
+    /// Pushes `delta` around the cycle and updates the arc states.
+    fn change_flow(&mut self, in_arc: ArcId, join: NodeId, delta: V, exchange: Option<Exchange>) {
         let source = self.source.as_ref();
         let target = self.target.as_ref();
         let pred = self.pred.as_ref();
@@ -550,10 +534,8 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let parent = self.parent.as_ref();
         let mut state = self.state.as_mut();
         let mut flow = self.flow.as_mut();
-        let in_arc = self.in_arc;
-        let join = self.join;
-        if self.delta > V::zero() {
-            let val = state[in_arc].sign::<V>() * self.delta;
+        if delta > V::zero() {
+            let val = state[in_arc].sign::<V>() * delta;
             flow[in_arc] += val;
             for u in path_up(parent, source[in_arc], join) {
                 flow[pred[u]] -= pred_dir[u].sign::<V>() * val;
@@ -562,20 +544,22 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 flow[pred[u]] += pred_dir[u].sign::<V>() * val;
             }
         }
-        if change {
-            state[in_arc] = ArcState::Tree;
-            let out_arc = pred[self.u_out];
-            state[out_arc] = if flow[out_arc] == V::zero() {
-                ArcState::Lower
-            } else {
-                ArcState::Upper
-            };
-        } else {
-            state[in_arc] = state[in_arc].flipped();
+        match exchange {
+            Some(Exchange { u_out, .. }) => {
+                state[in_arc] = ArcState::Tree;
+                let out_arc = pred[u_out];
+                state[out_arc] = if flow[out_arc] == V::zero() {
+                    ArcState::Lower
+                } else {
+                    ArcState::Upper
+                };
+            }
+            None => state[in_arc] = state[in_arc].flipped(),
         }
     }
 
-    fn update_tree_structure(&mut self) {
+    /// Replaces the leaving arc with `in_arc` in the spanning tree.
+    fn update_tree_structure(&mut self, in_arc: ArcId, join: NodeId, exchange: Exchange) {
         let source = self.source.as_ref();
         let mut parent = self.parent.as_mut();
         let mut pred = self.pred.as_mut();
@@ -585,17 +569,12 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let mut succ_num = self.succ_num.as_mut();
         let mut last_succ = self.last_succ.as_mut();
         let dirty_revs = &mut self.dirty_revs;
-        let u_in = self.u_in;
-        let v_in = self.v_in;
-        let u_out = self.u_out;
-        let in_arc = self.in_arc;
-        let join = self.join;
+        let Exchange { u_in, v_in, u_out } = exchange;
 
         let old_rev_thread = rev_thread[u_out];
         let old_succ_num = succ_num[u_out];
         let old_last_succ = last_succ[u_out];
         let v_out = parent[u_out];
-        self.v_out = v_out;
         let in_dir = if u_in == source[in_arc] {
             Dir::Up
         } else {
@@ -734,14 +713,14 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
     /// Shifts the potentials of the subtree that moved under v_in so the
     /// entering arc has zero reduced cost.
-    fn update_potential(&mut self) {
+    fn update_potential(&mut self, in_arc: ArcId, exchange: Exchange) {
         let cost = self.cost.as_ref();
         let pred_dir = self.pred_dir.as_ref();
         let thread = self.thread.as_ref();
         let last_succ = self.last_succ.as_ref();
         let mut pi = self.pi.as_mut();
-        let u_in = self.u_in;
-        let sigma = pi[self.v_in] - pi[u_in] - pred_dir[u_in].sign::<C>() * cost[self.in_arc];
+        let Exchange { u_in, v_in, .. } = exchange;
+        let sigma = pi[v_in] - pi[u_in] - pred_dir[u_in].sign::<C>() * cost[in_arc];
         let end = thread[last_succ[u_in]];
         let mut u = u_in;
         while u != end {
@@ -750,19 +729,19 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         }
     }
 
-    /// Performs one pivot on `self.in_arc`. Fails if the cycle has infinite
-    /// capacity, i.e. the problem is unbounded.
+    /// Pivots `in_arc` into the basis. Fails if the cycle it closes has
+    /// infinite capacity, i.e. the problem is unbounded.
     #[inline]
-    fn pivot(&mut self) -> Result<(), Error> {
-        self.find_join_node();
-        let change = self.find_leaving_arc();
-        if self.delta >= V::max_value() {
+    fn pivot(&mut self, in_arc: ArcId) -> Result<(), Error> {
+        let join = self.find_join_node(in_arc);
+        let (delta, exchange) = self.find_leaving_arc(in_arc, join);
+        if delta >= V::max_value() {
             return Err(Error::Unbounded);
         }
-        self.change_flow(change);
-        if change {
-            self.update_tree_structure();
-            self.update_potential();
+        self.change_flow(in_arc, join, delta, exchange);
+        if let Some(exchange) = exchange {
+            self.update_tree_structure(in_arc, join, exchange);
+            self.update_potential(in_arc, exchange);
         }
         Ok(())
     }
@@ -839,9 +818,8 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         }
 
         for in_arc in arc_vector {
-            self.in_arc = in_arc;
             if self.reduced_cost(in_arc) < C::zero() {
-                self.pivot()?;
+                self.pivot(in_arc)?;
             }
         }
         Ok(())
@@ -878,8 +856,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             let Some(in_arc) = pivot.find_entering_arc(&view) else {
                 break;
             };
-            self.in_arc = ArcId::new(in_arc);
-            self.pivot()?;
+            self.pivot(ArcId::new(in_arc))?;
         }
 
         // Flow left on an artificial arc outside the search range means some

@@ -12,7 +12,7 @@ use std::ops::{ControlFlow, Range};
 
 use itertools::izip;
 
-use crate::ivec::{IRef, IVec};
+use crate::ivec::{ArcId, IRef, IVec, Idx, NodeId, first_ids};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
 /// Strategy for choosing the entering arc in each simplex iteration.
@@ -126,10 +126,10 @@ pub struct NetworkSimplex<V, C> {
     pivot_rule: PivotRule,
     arc_mixing: bool,
 
-    node_num: u32,
-    arc_num: u32,
-    all_arc_num: u32,
-    search_arc_num: u32,
+    node_num: usize,
+    arc_num: usize,
+    all_arc_num: usize,
+    search_arc_num: usize,
 
     has_lower: bool,
     stype: SupplyType,
@@ -137,38 +137,37 @@ pub struct NetworkSimplex<V, C> {
 
     // Internal arc index of each problem arc; differs from the identity when
     // arc mixing is on.
-    arc_id: Vec<u32>,
-    source: IVec<u32>,
-    target: IVec<u32>,
+    arc_id: Vec<ArcId>,
+    source: IVec<ArcId, NodeId>,
+    target: IVec<ArcId, NodeId>,
 
-    lower: IVec<V>,
-    upper: IVec<V>,
-    cap: IVec<V>,
-    cost: IVec<C>,
-    supply: IVec<V>,
-    flow: IVec<V>,
-    pi: IVec<C>,
+    lower: IVec<ArcId, V>,
+    upper: IVec<ArcId, V>,
+    cap: IVec<ArcId, V>,
+    cost: IVec<ArcId, C>,
+    supply: IVec<NodeId, V>,
+    flow: IVec<ArcId, V>,
+    pi: IVec<NodeId, C>,
 
-    // Spanning tree
-    // The root is its own parent.
-    parent: IVec<u32>,
-    pred: IVec<u32>,
-    thread: IVec<u32>,
-    rev_thread: IVec<u32>,
-    succ_num: IVec<u32>,
-    last_succ: IVec<u32>,
-    pred_dir: IVec<Dir>,
-    state: IVec<ArcState>,
-    dirty_revs: Vec<u32>,
-    root: u32,
+    // Spanning tree. The root is its own parent.
+    parent: IVec<NodeId, NodeId>,
+    pred: IVec<NodeId, ArcId>,
+    thread: IVec<NodeId, NodeId>,
+    rev_thread: IVec<NodeId, NodeId>,
+    succ_num: IVec<NodeId, u32>,
+    last_succ: IVec<NodeId, NodeId>,
+    pred_dir: IVec<NodeId, Dir>,
+    state: IVec<ArcId, ArcState>,
+    dirty_revs: Vec<NodeId>,
+    root: NodeId,
 
     // Current pivot
-    in_arc: u32,
-    join: u32,
-    u_in: u32,
-    v_in: u32,
-    u_out: u32,
-    v_out: u32,
+    in_arc: ArcId,
+    join: NodeId,
+    u_in: NodeId,
+    v_in: NodeId,
+    u_out: NodeId,
+    v_out: NodeId,
     delta: V,
 }
 
@@ -209,13 +208,13 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             pred_dir: IVec::slot(15),
             state: IVec::slot(16),
             dirty_revs: Vec::new(),
-            root: 0,
-            in_arc: 0,
-            join: 0,
-            u_in: 0,
-            v_in: 0,
-            u_out: 0,
-            v_out: 0,
+            root: NodeId::default(),
+            in_arc: ArcId::default(),
+            join: NodeId::default(),
+            u_in: NodeId::default(),
+            v_in: NodeId::default(),
+            u_out: NodeId::default(),
+            v_out: NodeId::default(),
             delta: V::zero(),
         }
     }
@@ -259,7 +258,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         }
 
         let flow: Vec<V> = self.arc_id.iter().map(|&i| self.flow[i]).collect();
-        let potential = self.pi[..n].to_vec();
+        let potential = self.pi[..self.root].to_vec();
         let total_cost = problem.total_cost(&flow);
         Ok(Solution {
             flow,
@@ -269,30 +268,30 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     }
 
     fn load(&mut self, p: &Problem<V, C>) {
-        let n = p.node_count() as u32;
-        let m = p.arc_count() as u32;
+        let n = p.node_count();
+        let m = p.arc_count();
         self.node_num = n;
         self.arc_num = m;
-        let all_node_num = (n + 1) as usize;
-        let max_arc_num = (m + 2 * n) as usize;
+        let all_node_num = n + 1;
+        let max_arc_num = m + 2 * n;
 
-        self.source.reset(max_arc_num, 0);
-        self.target.reset(max_arc_num, 0);
-        self.lower.reset(m as usize, V::zero());
-        self.upper.reset(m as usize, V::zero());
+        self.source.reset(max_arc_num, NodeId::default());
+        self.target.reset(max_arc_num, NodeId::default());
+        self.lower.reset(m, V::zero());
+        self.upper.reset(m, V::zero());
         self.cap.reset(max_arc_num, V::zero());
         self.cost.reset(max_arc_num, C::zero());
         self.supply.reset(all_node_num, V::zero());
         self.flow.reset(max_arc_num, V::zero());
         self.pi.reset(all_node_num, C::zero());
 
-        self.parent.reset(all_node_num, 0);
-        self.pred.reset(all_node_num, 0);
+        self.parent.reset(all_node_num, NodeId::default());
+        self.pred.reset(all_node_num, ArcId::default());
         self.pred_dir.reset(all_node_num, Dir::Up);
-        self.thread.reset(all_node_num, 0);
-        self.rev_thread.reset(all_node_num, 0);
+        self.thread.reset(all_node_num, NodeId::default());
+        self.rev_thread.reset(all_node_num, NodeId::default());
         self.succ_num.reset(all_node_num, 0);
-        self.last_succ.reset(all_node_num, 0);
+        self.last_succ.reset(all_node_num, NodeId::default());
         self.state.reset(max_arc_num, ArcState::Tree);
 
         self.arc_id.clear();
@@ -300,9 +299,9 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             // Deal arcs round-robin into `skip` interleaved runs.
             let skip = (m / n).max(3);
             self.arc_id
-                .extend((0..skip).flat_map(|j| (j..m).step_by(skip as usize)));
+                .extend((0..skip).flat_map(|j| (j..m).step_by(skip)).map(ArcId::new));
         } else {
-            self.arc_id.extend(0..m);
+            self.arc_id.extend(first_ids::<ArcId>(m));
         }
 
         for (&i, &source, &target, &lower, &upper, &cost) in izip!(
@@ -319,7 +318,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             self.upper[i] = upper;
             self.cost[i] = cost;
         }
-        (*self.supply)[..n as usize].copy_from_slice(&p.supply);
+        self.supply[..NodeId::new(n)].copy_from_slice(&p.supply);
         self.has_lower = p.lower.iter().any(|&l| l != V::zero());
         self.stype = p.supply_type;
     }
@@ -327,11 +326,15 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     fn init(&mut self) -> Result<(), Error> {
         let n = self.node_num;
         let m = self.arc_num;
-        let (nodes, arcs) = (..n as usize, ..m as usize);
+        let arcs = ..ArcId::new(m);
+        let root = NodeId::new(n);
+        self.root = root;
         let inf = V::max_value();
         let max = V::max_value();
 
-        self.sum_supply = self.supply[nodes].iter().fold(V::zero(), |sum, &s| sum + s);
+        self.sum_supply = self.supply[..root]
+            .iter()
+            .fold(V::zero(), |sum, &s| sum + s);
         let feasible_type = match self.stype {
             SupplyType::Geq => self.sum_supply <= V::zero(),
             SupplyType::Leq => self.sum_supply >= V::zero(),
@@ -373,24 +376,13 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         // Start from the tree where every node hangs directly off the
         // artificial root, in thread order 0, 1, ..., n - 1. The root has no
         // pred arc, so its pred entry is never read.
-        let root = n;
-        self.root = root;
+        let first = NodeId::new(0);
         self.parent.fill(root);
         self.succ_num.fill(1);
-        self.succ_num[root] = n + 1;
-        for (thread, u) in self.thread.iter_mut().zip((1..=n).chain([0])) {
-            *thread = u;
-        }
-        for (rev_thread, u) in self
-            .rev_thread
-            .iter_mut()
-            .zip([root].into_iter().chain(0..n))
-        {
-            *rev_thread = u;
-        }
-        for (last_succ, u) in self.last_succ.iter_mut().zip((0..n).chain([root - 1])) {
-            *last_succ = u;
-        }
+        self.succ_num[root] = n as u32 + 1;
+        self.thread[root] = first;
+        self.rev_thread[first] = root;
+        self.last_succ[root] = root.prev();
         self.supply[root] = -self.sum_supply;
         self.pi[root] = C::zero();
 
@@ -407,8 +399,12 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             Dir::Down
         };
         self.search_arc_num = if has_slack { m + n } else { m };
-        let mut next_extra = m + n;
-        for u in 0..n {
+        let mut next_extra = ArcId::new(m + n);
+        for u in first_ids::<NodeId>(n) {
+            self.thread[u] = u.next();
+            self.rev_thread[u.next()] = u;
+            self.last_succ[u] = u;
+
             let supply = self.supply[u];
             let dir = if supply > V::zero() || (supply == V::zero() && costly == Dir::Down) {
                 Dir::Up
@@ -416,11 +412,11 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 Dir::Down
             };
             let cost = if dir == costly { art_cost } else { C::zero() };
-            let mut e = m + u;
+            let mut e = ArcId::new(m + u.index());
             if has_slack && dir == costly {
                 self.set_artificial(e, u, dir.reversed(), V::zero(), C::zero(), ArcState::Lower);
                 e = next_extra;
-                next_extra += 1;
+                next_extra = next_extra.next();
             }
             let flow = dir.sign::<V>() * supply;
             self.set_artificial(e, u, dir, flow, cost, ArcState::Tree);
@@ -428,14 +424,14 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             self.pred_dir[u] = dir;
             self.pi[u] = -dir.sign::<C>() * cost;
         }
-        self.all_arc_num = if has_slack { next_extra } else { m + n };
+        self.all_arc_num = if has_slack { next_extra.index() } else { m + n };
 
         Ok(())
     }
 
     /// Sets up the infinite-capacity artificial arc `e` between node `u` and
     /// the root, oriented `dir` relative to `u`.
-    fn set_artificial(&mut self, e: u32, u: u32, dir: Dir, flow: V, cost: C, state: ArcState) {
+    fn set_artificial(&mut self, e: ArcId, u: NodeId, dir: Dir, flow: V, cost: C, state: ArcState) {
         let (source, target) = match dir {
             Dir::Up => (u, self.root),
             Dir::Down => (self.root, u),
@@ -449,7 +445,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     }
 
     #[inline(always)]
-    fn reduced_cost(&self, e: u32) -> C {
+    fn reduced_cost(&self, e: ArcId) -> C {
         self.state[e].sign::<C>()
             * (self.cost[e] + self.pi[self.source[e]] - self.pi[self.target[e]])
     }
@@ -503,7 +499,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
         // How far flow can be pushed along the pred arc of `u` when the
         // cycle runs through it in direction `along`.
-        let residual = |u: u32, along: Dir| {
+        let residual = |u: NodeId, along: Dir| {
             let e = pred[u];
             let d = flow[e];
             if pred_dir[u] == along {
@@ -772,16 +768,12 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     /// Heuristic warm start: pivots in arcs likely to carry flow in the
     /// optimum. Fails if the problem turns out to be unbounded.
     fn initial_pivots(&mut self) -> Result<(), Error> {
-        let n = self.node_num as usize;
-        let m = self.arc_num as usize;
+        let n = self.node_num;
+        let m = self.arc_num;
+        let arcs = ..ArcId::new(m);
 
-        let supplies = &self.supply[..n];
-        let nodes_where = |keep: fn(V) -> bool| -> Vec<u32> {
-            (0..n as u32)
-                .zip(supplies)
-                .filter(|&(_, &s)| keep(s))
-                .map(|(u, _)| u)
-                .collect()
+        let nodes_where = |keep: fn(V) -> bool| -> Vec<NodeId> {
+            first_ids(n).filter(|&u| keep(self.supply[u])).collect()
         };
         let supply_nodes = nodes_where(|s| s > V::zero());
         let demand_nodes = nodes_where(|s| s < V::zero());
@@ -795,60 +787,53 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             return Ok(());
         }
 
-        let targets = &self.target[..m];
-        let mut arc_vector: Vec<u32> = Vec::new();
+        let mut arc_vector: Vec<ArcId> = Vec::new();
         if self.sum_supply >= V::zero() {
-            if supply_nodes.len() == 1 && demand_nodes.len() == 1 {
+            if let ([s], [t]) = (&supply_nodes[..], &demand_nodes[..]) {
                 // Reverse DFS from the sink to the source over arcs that can
-                // carry the whole amount.
-                let mut in_first = vec![0u32; n + 1];
-                for &t in targets {
-                    in_first[t as usize + 1] += 1;
+                // carry the whole amount. The incoming arcs of `v` are
+                // `in_arcs[in_first[v]..in_first[v.next()]]`.
+                let mut in_first = IVec::<NodeId, usize>::filled(n + 1, 0);
+                for &t in &self.target[arcs] {
+                    in_first[t.next()] += 1;
                 }
                 let mut sum = 0;
-                for count in &mut in_first {
+                for count in in_first.iter_mut() {
                     sum += *count;
                     *count = sum;
                 }
                 let mut fill = in_first.clone();
-                let mut in_arcs = vec![0u32; m];
-                for (j, &t) in (0..).zip(targets) {
-                    let slot = &mut fill[t as usize];
-                    in_arcs[*slot as usize] = j;
-                    *slot += 1;
+                let mut in_arcs = vec![ArcId::default(); m];
+                for (j, &t) in first_ids::<ArcId>(m).zip(&self.target[arcs]) {
+                    in_arcs[fill[t]] = j;
+                    fill[t] += 1;
                 }
 
-                let mut reached = vec![false; n];
-                let s = supply_nodes[0];
-                let t = demand_nodes[0];
-                let mut stack = vec![t];
-                reached[t as usize] = true;
+                let mut reached = IVec::<NodeId, bool>::filled(n, false);
+                let mut stack = vec![*t];
+                reached[*t] = true;
                 while let Some(v) = stack.pop() {
-                    if v == s {
+                    if v == *s {
                         break;
                     }
-                    let range = in_first[v as usize] as usize..in_first[v as usize + 1] as usize;
-                    for &j in &in_arcs[range] {
+                    for &j in &in_arcs[in_first[v]..in_first[v.next()]] {
                         let u = self.source[j];
-                        if reached[u as usize] {
-                            continue;
-                        }
-                        if self.cap[j] >= total {
+                        if !reached[u] && self.cap[j] >= total {
                             arc_vector.push(j);
-                            reached[u as usize] = true;
+                            reached[u] = true;
                             stack.push(u);
                         }
                     }
                 }
             } else {
                 // Find the min. cost incoming arc for each demand node
-                let best = self.cheapest_arcs(targets);
-                arc_vector.extend(demand_nodes.iter().filter_map(|&v| best[v as usize]));
+                let best = self.cheapest_arcs(&self.target[arcs]);
+                arc_vector.extend(demand_nodes.iter().filter_map(|&v| best[v]));
             }
         } else {
             // Find the min. cost outgoing arc for each supply node
-            let best = self.cheapest_arcs(&self.source[..m]);
-            arc_vector.extend(supply_nodes.iter().filter_map(|&u| best[u as usize]));
+            let best = self.cheapest_arcs(&self.source[arcs]);
+            arc_vector.extend(supply_nodes.iter().filter_map(|&u| best[u]));
         }
 
         for in_arc in arc_vector {
@@ -862,19 +847,20 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
     /// For each node, the cheapest original arc with that node as its
     /// endpoint in `endpoints`.
-    fn cheapest_arcs(&self, endpoints: &[u32]) -> Vec<Option<u32>> {
-        let mut best: Vec<Option<(u32, C)>> = vec![None; self.node_num as usize];
-        for (j, &v, &c) in izip!(0.., endpoints, &*self.cost) {
-            let best = &mut best[v as usize];
-            if best.is_none_or(|(_, best_cost)| c < best_cost) {
-                *best = Some((j, c));
+    fn cheapest_arcs(&self, endpoints: &[NodeId]) -> IVec<NodeId, Option<ArcId>> {
+        let mut best = IVec::filled(self.node_num, None);
+        let mut best_cost = IVec::filled(self.node_num, C::max_value());
+        for (j, &v, &c) in izip!(first_ids::<ArcId>(endpoints.len()), endpoints, &*self.cost) {
+            if best[v].is_none() || c < best_cost[v] {
+                best[v] = Some(j);
+                best_cost[v] = c;
             }
         }
-        best.into_iter().map(|b| b.map(|(j, _)| j)).collect()
+        best
     }
 
     fn start<P: Pivot<C>>(&mut self) -> Result<(), Error> {
-        let mut pivot = P::new(self.search_arc_num as usize);
+        let mut pivot = P::new(self.search_arc_num);
 
         self.initial_pivots()?;
 
@@ -884,26 +870,26 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 target: &self.target,
                 cost: &self.cost,
                 state: &self.state,
-                pi: &self.pi,
-                search_arc_num: self.search_arc_num as usize,
+                pi: self.pi.as_ref(),
+                search_arc_num: self.search_arc_num,
             };
             let Some(in_arc) = pivot.find_entering_arc(&view) else {
                 break;
             };
-            self.in_arc = in_arc as u32;
+            self.in_arc = ArcId::new(in_arc);
             self.pivot()?;
         }
 
         // Flow left on an artificial arc outside the search range means some
         // supply could not be routed.
-        let unsearched = self.search_arc_num as usize..self.all_arc_num as usize;
+        let unsearched = ArcId::new(self.search_arc_num)..ArcId::new(self.all_arc_num);
         if self.flow[unsearched].iter().any(|&f| f != V::zero()) {
             return Err(Error::Infeasible);
         }
 
         // Transform the solution and the supply map to the original form
         if self.has_lower {
-            let arcs = ..self.arc_num as usize;
+            let arcs = ..ArcId::new(self.arc_num);
             for (flow, &c, &source, &target) in izip!(
                 &mut self.flow[arcs],
                 &self.lower[arcs],
@@ -920,7 +906,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
         // Shift potentials to meet the sign requirements of the GEQ/LEQ
         // optimality conditions
-        let pi = &mut self.pi[..self.node_num as usize];
+        let pi = &mut self.pi[..self.root];
         if self.sum_supply == V::zero() {
             match self.stype {
                 SupplyType::Geq => {
@@ -944,7 +930,11 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
 /// The nodes from `from` up to, but not including, its ancestor `to`.
 #[inline(always)]
-fn path_up(parent: IRef<'_, u32>, from: u32, to: u32) -> impl Iterator<Item = u32> + '_ {
+fn path_up(
+    parent: IRef<'_, NodeId, NodeId>,
+    from: NodeId,
+    to: NodeId,
+) -> impl Iterator<Item = NodeId> + '_ {
     let mut u = from;
     iter::from_fn(move || {
         if u == to {
@@ -958,17 +948,17 @@ fn path_up(parent: IRef<'_, u32>, from: u32, to: u32) -> impl Iterator<Item = u3
 
 /// The nodes from `from` up to and including the root.
 #[inline(always)]
-fn ancestors(parent: IRef<'_, u32>, from: u32) -> impl Iterator<Item = u32> + '_ {
+fn ancestors(parent: IRef<'_, NodeId, NodeId>, from: NodeId) -> impl Iterator<Item = NodeId> + '_ {
     iter::successors(Some(from), move |&u| Some(parent[u]).filter(|&p| p != u))
 }
 
 /// The parts of the solver state a pivot rule reads.
 struct PivotView<'a, C> {
-    source: &'a [u32],
-    target: &'a [u32],
+    source: &'a [NodeId],
+    target: &'a [NodeId],
     cost: &'a [C],
     state: &'a [ArcState],
-    pi: &'a [C],
+    pi: IRef<'a, NodeId, C>,
     search_arc_num: usize,
 }
 
@@ -978,7 +968,7 @@ impl<C: Number> PivotView<'_, C> {
     #[inline(always)]
     fn eligibility(&self, e: usize) -> C {
         self.state[e].sign::<C>()
-            * (self.cost[e] + self.pi[self.source[e] as usize] - self.pi[self.target[e] as usize])
+            * (self.cost[e] + self.pi[self.source[e]] - self.pi[self.target[e]])
     }
 
     /// Calls `f(e, eligibility(e))` for each arc in `range`, in order,
@@ -1001,8 +991,7 @@ impl<C: Number> PivotView<'_, C> {
             .zip(&self.source[range.clone()])
             .zip(&self.target[range.clone()]);
         for (i, (((&state, &cost), &source), &target)) in arcs.enumerate() {
-            let c =
-                state.sign::<C>() * (cost + self.pi[source as usize] - self.pi[target as usize]);
+            let c = state.sign::<C>() * (cost + self.pi[source] - self.pi[target]);
             f(range.start + i, c)?;
         }
         ControlFlow::Continue(())

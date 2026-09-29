@@ -1,4 +1,5 @@
 use crate::Number;
+use crate::ivec::{Idx, NodeId};
 
 /// How node supplies constrain the flow balance `out(v) - in(v)` at each
 /// node `v`.
@@ -25,8 +26,8 @@ pub enum SupplyType {
 #[derive(Clone, Debug, Default)]
 pub struct Problem<V, C> {
     pub(crate) supply: Vec<V>,
-    pub(crate) source: Vec<u32>,
-    pub(crate) target: Vec<u32>,
+    pub(crate) source: Vec<NodeId>,
+    pub(crate) target: Vec<NodeId>,
     pub(crate) lower: Vec<V>,
     pub(crate) upper: Vec<V>,
     pub(crate) cost: Vec<C>,
@@ -83,8 +84,8 @@ impl<V: Number, C: Number> Problem<V, C> {
             target < n,
             "arc target {target} out of range (node count {n})"
         );
-        self.source.push(source as u32);
-        self.target.push(target as u32);
+        self.source.push(NodeId::new(source));
+        self.target.push(NodeId::new(target));
         self.lower.push(lower);
         self.upper.push(upper);
         self.cost.push(cost);
@@ -120,11 +121,11 @@ impl<V: Number, C: Number> Problem<V, C> {
     }
 
     pub fn source(&self, arc: usize) -> usize {
-        self.source[arc] as usize
+        self.source[arc].index()
     }
 
     pub fn target(&self, arc: usize) -> usize {
-        self.target[arc] as usize
+        self.target[arc].index()
     }
 
     pub fn lower(&self, arc: usize) -> V {

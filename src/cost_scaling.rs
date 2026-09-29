@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use itertools::izip;
 
 use crate::circulation::{Layout, circulation};
-use crate::ivec::{IMut, IVec, Link, link};
+use crate::ivec::{ArcId, IMut, IVec, Idx, Link, NodeId, first_ids, ids};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
 /// The flow-moving operation used alongside relabeling.
@@ -67,10 +67,10 @@ pub struct CostScaling<V, C, L = i64> {
     method: Method,
     alpha: u32,
 
-    node_num: u32,
-    res_node_num: u32,
-    res_arc_num: u32,
-    root: u32,
+    node_num: usize,
+    res_node_num: usize,
+    res_arc_num: usize,
+    root: NodeId,
     // Whether the problem was mirrored to turn LEQ constraints into GEQ.
     mirrored: bool,
 
@@ -79,35 +79,37 @@ pub struct CostScaling<V, C, L = i64> {
     sup_node_num: usize,
 
     // Forward and backward residual arc of each problem arc
-    arc_idf: Vec<u32>,
-    arc_idb: Vec<u32>,
-    first_out: IVec<u32>,
-    forward: IVec<bool>,
-    source: IVec<u32>,
-    target: IVec<u32>,
-    reverse: IVec<u32>,
+    arc_idf: Vec<ArcId>,
+    arc_idb: Vec<ArcId>,
+    // Node `u`'s arc block is `first_out[u]..first_out[u.next()]`.
+    first_out: IVec<NodeId, ArcId>,
+    forward: IVec<ArcId, bool>,
+    source: IVec<ArcId, NodeId>,
+    target: IVec<ArcId, NodeId>,
+    reverse: IVec<ArcId, ArcId>,
 
-    lower: IVec<V>,
-    upper: IVec<V>,
-    scost: IVec<C>,
-    supply: IVec<V>,
+    lower: IVec<ArcId, V>,
+    upper: IVec<ArcId, V>,
+    scost: IVec<ArcId, C>,
+    supply: IVec<NodeId, V>,
 
-    res_cap: IVec<V>,
+    res_cap: IVec<ArcId, V>,
     // Forward arcs whose capacity was infinite before being bounded by the
     // total deficit.
-    uncapped: IVec<bool>,
-    cost: IVec<L>,
-    pi: IVec<L>,
-    excess: IVec<V>,
-    next_out: IVec<u32>,
-    active_nodes: VecDeque<u32>,
+    uncapped: IVec<ArcId, bool>,
+    cost: IVec<ArcId, L>,
+    pi: IVec<NodeId, L>,
+    excess: IVec<NodeId, V>,
+    next_out: IVec<NodeId, ArcId>,
+    active_nodes: VecDeque<NodeId>,
 
     epsilon: L,
 
-    buckets: IVec<Link>,
-    bucket_next: IVec<Link>,
-    bucket_prev: IVec<u32>,
-    rank: IVec<u32>,
+    // Bucket list heads, indexed by rank
+    buckets: IVec<usize, Link<NodeId>>,
+    bucket_next: IVec<NodeId, Link<NodeId>>,
+    bucket_prev: IVec<NodeId, NodeId>,
+    rank: IVec<NodeId, u32>,
     max_rank: u32,
 }
 
@@ -127,7 +129,7 @@ impl<V: Number, C: Number, L: Number> Default for CostScaling<V, C, L> {
             node_num: 0,
             res_node_num: 0,
             res_arc_num: 0,
-            root: 0,
+            root: NodeId::default(),
             mirrored: false,
             has_lower: false,
             sum_supply: V::zero(),
@@ -197,7 +199,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.start();
 
         let flow: Vec<V> = self.arc_idb.iter().map(|&b| self.res_cap[b]).collect();
-        let potential: Vec<C> = (*self.pi)[..n]
+        let potential: Vec<C> = self.pi[..self.root]
             .iter()
             .map(|&p| {
                 let p: C = p.cast();
@@ -218,14 +220,15 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// incoming arcs (backward), and a backward arc to the artificial root.
     /// The root's block holds the matching forward arcs to every node.
     fn load(&mut self, p: &Problem<V, C>) {
-        let n = p.node_count() as u32;
-        let m = p.arc_count() as u32;
+        let n = p.node_count();
+        let m = p.arc_count();
         self.node_num = n;
         self.res_node_num = n + 1;
         self.res_arc_num = 2 * (m + n);
-        self.root = n;
-        let res_node_num = self.res_node_num as usize;
-        let res_arc_num = self.res_arc_num as usize;
+        let root = NodeId::new(n);
+        self.root = root;
+        let res_node_num = self.res_node_num;
+        let res_arc_num = self.res_arc_num;
 
         // Mirroring every arc and negating supplies turns
         // `out - in <= supply` into `out - in >= -supply`.
@@ -236,11 +239,11 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             (&p.source, &p.target)
         };
 
-        self.first_out.reset(res_node_num + 1, 0);
+        self.first_out.reset(res_node_num + 1, ArcId::default());
         self.forward.reset(res_arc_num, false);
-        self.source.reset(res_arc_num, 0);
-        self.target.reset(res_arc_num, 0);
-        self.reverse.reset(res_arc_num, 0);
+        self.source.reset(res_arc_num, NodeId::default());
+        self.target.reset(res_arc_num, NodeId::default());
+        self.reverse.reset(res_arc_num, ArcId::default());
         self.lower.reset(res_arc_num, V::zero());
         self.upper.reset(res_arc_num, V::max_value());
         self.scost.reset(res_arc_num, C::zero());
@@ -250,33 +253,41 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.cost.reset(res_arc_num, L::zero());
         self.pi.reset(res_node_num, L::zero());
         self.excess.reset(res_node_num, V::zero());
-        self.next_out.reset(res_node_num, 0);
+        self.next_out.reset(res_node_num, ArcId::default());
 
-        // Block sizes, then block starts
-        let mut out_pos = vec![0u32; n as usize];
-        let mut in_pos = vec![0u32; n as usize];
+        // Block sizes, then block starts. `out_pos` and `in_pos` track the
+        // next free forward and backward slot in each block.
+        let mut outs = IVec::<NodeId, usize>::filled(n, 0);
+        let mut ins = IVec::<NodeId, usize>::filled(n, 0);
         for (&s, &t) in src.iter().zip(tgt) {
-            out_pos[s as usize] += 1;
-            in_pos[t as usize] += 1;
+            outs[s] += 1;
+            ins[t] += 1;
         }
-        let mut j = 0u32;
-        for (first_out, out_pos, in_pos) in izip!(&mut *self.first_out, &mut out_pos, &mut in_pos) {
-            let (outs, ins) = (*out_pos, *in_pos);
-            *first_out = j;
-            *out_pos = j;
-            *in_pos = j + outs;
+        let mut out_pos = IVec::<NodeId, ArcId>::filled(n, ArcId::default());
+        let mut in_pos = IVec::<NodeId, ArcId>::filled(n, ArcId::default());
+        let mut j = 0;
+        for (first_out, out_pos, in_pos, &outs, &ins) in izip!(
+            &mut *self.first_out,
+            &mut *out_pos,
+            &mut *in_pos,
+            &*outs,
+            &*ins,
+        ) {
+            *first_out = ArcId::new(j);
+            *out_pos = ArcId::new(j);
+            *in_pos = ArcId::new(j + outs);
             j += outs + ins + 1;
         }
-        self.first_out[n] = j;
-        self.first_out[n + 1] = self.res_arc_num;
+        self.first_out[root] = ArcId::new(j);
+        self.first_out[root.next()] = ArcId::new(res_arc_num);
 
         self.arc_idf.clear();
         self.arc_idb.clear();
         for (&s, &t, &lower, &upper, &cost) in izip!(src, tgt, &p.lower, &p.upper, &p.cost) {
-            let f = out_pos[s as usize];
-            out_pos[s as usize] += 1;
-            let b = in_pos[t as usize];
-            in_pos[t as usize] += 1;
+            let f = out_pos[s];
+            out_pos[s] = f.next();
+            let b = in_pos[t];
+            in_pos[t] = b.next();
             self.arc_idf.push(f);
             self.arc_idb.push(b);
             self.forward[f] = true;
@@ -293,9 +304,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             self.scost[b] = -cost;
         }
 
-        let root = self.root;
-        for (i, k) in (0..n).zip(self.first_out[root]..) {
-            let j = self.first_out[i + 1] - 1;
+        for (i, k) in first_ids::<NodeId>(n).zip(self.block(root)) {
+            let j = self.first_out[i.next()].prev();
             self.source[j] = i;
             self.target[j] = root;
             self.reverse[j] = k;
@@ -317,7 +327,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let res_node_num = self.res_node_num;
         let max = V::max_value();
 
-        self.sum_supply = self.supply[..n as usize]
+        self.sum_supply = self.supply[..root]
             .iter()
             .fold(V::zero(), |sum, &s| sum + s);
         if self.sum_supply > V::zero() {
@@ -352,21 +362,22 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         // Relative to its lower bound (upper bound for negative arcs), no
         // arc needs to carry more than the total deficit in some optimal
         // flow, so that bounds every infinite arc above its lower bound.
-        let real_arcs = ..self.first_out[root] as usize;
+        let root_arcs = self.first_out[root];
         for (j, upper, &lower, &forward, uncapped) in izip!(
-            0..,
+            first_ids::<ArcId>(self.res_arc_num),
             &mut *self.upper,
             &*self.lower,
             &*self.forward,
             &mut *self.uncapped,
         ) {
             if *upper >= max {
-                *uncapped = forward && real_arcs.contains(&j);
+                *uncapped = forward && j < root_arcs;
                 *upper = lower.saturating_add(max_cap);
             }
         }
 
         // Scale the costs and set the initial epsilon
+        let real_arcs = ..root_arcs;
         let alpha = self.alpha;
         let scale = res_node_num as i128 * alpha as i128;
         let max_abs_cost = self.scost[real_arcs]
@@ -388,44 +399,51 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.epsilon = max_cost.unwrap_or(L::zero()).max(L::zero()) / L::from_i128(alpha as i128);
 
         // Find a feasible flow with lower bounds shifted to zero
-        let mut cap = vec![V::zero(); self.res_arc_num as usize];
-        let mut sup: Vec<V> = self.supply[..n as usize].to_vec();
+        let mut cap = IVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
+        let mut sup = IVec::<NodeId, V>::filled(n, V::zero());
+        sup.copy_from_slice(&self.supply[..root]);
         for &f in &self.arc_idf {
             let c = if self.has_lower {
                 self.lower[f]
             } else {
                 V::zero()
             };
-            cap[f as usize] = self.upper[f] - c;
-            sup[self.source[f] as usize] -= c;
-            sup[self.target[f] as usize] += c;
+            cap[f] = self.upper[f] - c;
+            sup[self.source[f]] -= c;
+            sup[self.target[f]] += c;
         }
         self.sup_node_num = sup.iter().filter(|&&s| s > V::zero()).count();
 
-        let mut flow = vec![V::zero(); self.res_arc_num as usize];
+        let mut flow = IVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
         let layout = Layout {
-            node_num: n as usize,
-            first_out: &self.first_out,
-            forward: &self.forward,
-            target: &self.target,
-            reverse: &self.reverse,
+            node_num: n,
+            first_out: self.first_out.as_ref(),
+            forward: self.forward.as_ref(),
+            target: self.target.as_ref(),
+            reverse: self.reverse.as_ref(),
         };
-        circulation(&layout, &self.arc_idf, &cap, &sup, &mut flow)?;
+        circulation(
+            &layout,
+            &self.arc_idf,
+            cap.as_ref(),
+            sup.as_ref(),
+            flow.as_mut(),
+        )?;
 
         // Set residual capacities; with a supply surplus to absorb, route the
         // leftover deficits through the root.
         for (&f, &b) in self.arc_idf.iter().zip(&self.arc_idb) {
-            let fa = flow[f as usize];
-            self.res_cap[f] = cap[f as usize] - fa;
+            let fa = flow[f];
+            self.res_cap[f] = cap[f] - fa;
             self.res_cap[b] = fa;
             if self.sum_supply < V::zero() {
-                sup[self.source[f] as usize] -= fa;
-                sup[self.target[f] as usize] += fa;
+                sup[self.source[f]] -= fa;
+                sup[self.target[f]] += fa;
             }
         }
         if self.sum_supply < V::zero() {
-            self.excess[..n as usize].copy_from_slice(&sup);
-            for a in self.first_out[root]..self.res_arc_num {
+            self.excess[..root].copy_from_slice(&sup);
+            for a in self.block(root) {
                 let u = self.target[a];
                 let ra = self.reverse[a];
                 self.res_cap[a] = -self.sum_supply + V::one();
@@ -435,7 +453,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                 self.excess[u] = V::zero();
             }
         } else {
-            for a in self.first_out[root]..self.res_arc_num {
+            for a in self.block(root) {
                 let ra = self.reverse[a];
                 self.res_cap[a] = V::zero();
                 self.res_cap[ra] = V::zero();
@@ -444,18 +462,19 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             }
         }
 
-        self.max_rank = alpha * res_node_num;
-        self.buckets.reset(self.max_rank as usize, None);
-        self.bucket_next.reset(res_node_num as usize, None);
-        self.bucket_prev.reset(res_node_num as usize, 0);
-        self.rank.reset(res_node_num as usize, 0);
+        self.max_rank = alpha * res_node_num as u32;
+        self.buckets.reset(self.max_rank as usize, Link::NONE);
+        self.bucket_next.reset(res_node_num, Link::NONE);
+        self.bucket_prev.reset(res_node_num, NodeId::default());
+        self.rank.reset(res_node_num, 0);
 
         Ok(())
     }
 
+    /// The arcs out of `u` in the residual graph.
     #[inline(always)]
-    fn block(&self, u: u32) -> std::ops::Range<u32> {
-        self.first_out[u]..self.first_out[u + 1]
+    fn block(&self, u: NodeId) -> impl DoubleEndedIterator<Item = ArcId> + Clone + use<V, C, L> {
+        ids(self.first_out[u]..self.first_out[u.next()])
     }
 
     /// Runs the scaling phases, then turns the potentials into an exact
@@ -465,7 +484,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 
         match self.method {
             Method::Push => self.start_push(),
-            Method::Augment => self.start_augment(self.res_node_num as usize - 1),
+            Method::Augment => self.start_augment(self.res_node_num - 1),
             Method::PartialAugment => self.start_augment(MAX_PARTIAL_PATH_LENGTH),
         }
 
@@ -480,7 +499,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         // paths in the residual graph if so. Originally infinite arcs count
         // as open even when saturated at their finite stand-in capacity, or
         // the potentials would not certify optimality for the real problem.
-        let optimal = (0..self.res_node_num).all(|i| {
+        let optimal = first_ids::<NodeId>(self.res_node_num).all(|i| {
             self.block(i).all(|j| {
                 !self.is_open(j)
                     || self.scost[j].cast::<L>() + self.pi[i] - self.pi[self.target[j]] >= L::zero()
@@ -488,7 +507,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         });
         if !optimal {
             let dist = self.bellman_ford();
-            for (pi, d) in self.pi.iter_mut().zip(dist) {
+            for (pi, &d) in self.pi.iter_mut().zip(&*dist) {
                 *pi += d;
             }
         }
@@ -511,22 +530,22 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     }
 
     #[inline]
-    fn is_open(&self, j: u32) -> bool {
+    fn is_open(&self, j: ArcId) -> bool {
         self.res_cap[j] > V::zero() || self.uncapped[j]
     }
 
     /// Shortest path distances in the residual graph under the reduced
     /// original costs, from a virtual source joined to every node by a
     /// zero-length arc.
-    fn bellman_ford(&self) -> Vec<L> {
-        let n = self.res_node_num as usize;
-        let mut dist = vec![L::zero(); n];
-        let mut mask = vec![true; n];
-        let mut process: Vec<u32> = (0..n as u32).collect();
+    fn bellman_ford(&self) -> IVec<NodeId, L> {
+        let n = self.res_node_num;
+        let mut dist = IVec::filled(n, L::zero());
+        let mut mask = IVec::filled(n, true);
+        let mut process: Vec<NodeId> = first_ids(n).collect();
         let mut next = Vec::new();
         for _ in 0..n.saturating_sub(1) {
             for &u in &process {
-                mask[u as usize] = false;
+                mask[u] = false;
             }
             for &u in &process {
                 let pi_u = self.pi[u];
@@ -536,11 +555,11 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                     }
                     let v = self.target[j];
                     let w = self.scost[j].cast::<L>() + pi_u - self.pi[v];
-                    let relaxed = dist[u as usize] + w;
-                    if relaxed < dist[v as usize] {
-                        dist[v as usize] = relaxed;
-                        if !mask[v as usize] {
-                            mask[v as usize] = true;
+                    let relaxed = dist[u] + w;
+                    if relaxed < dist[v] {
+                        dist[v] = relaxed;
+                        if !mask[v] {
+                            mask[v] = true;
                             next.push(v);
                         }
                     }
@@ -568,9 +587,9 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let mut next_out = self.next_out.as_mut();
         let active_nodes = &mut self.active_nodes;
         let res_node_num = self.res_node_num;
-        for u in 0..res_node_num {
+        for u in first_ids::<NodeId>(res_node_num) {
             let pi_u = pi[u];
-            for a in first_out[u]..first_out[u + 1] {
+            for a in ids(first_out[u]..first_out[u.next()]) {
                 let delta = res_cap[a];
                 if delta > V::zero() {
                     let v = target[a];
@@ -584,8 +603,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             }
         }
 
-        active_nodes.extend((0..res_node_num).filter(|&u| excess[u] > V::zero()));
-        next_out.copy_from_slice(&first_out[..res_node_num as usize]);
+        active_nodes.extend(first_ids::<NodeId>(res_node_num).filter(|&u| excess[u] > V::zero()));
+        next_out.copy_from_slice(&first_out[..NodeId::new(res_node_num)]);
     }
 
     /// Price refinement heuristic: tries to make the current flow
@@ -593,7 +612,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// succeeded, in which case the phase needs no flow changes.
     fn price_refinement(&mut self) -> bool {
         let res_node_num = self.res_node_num;
-        let mut order = Vec::with_capacity(res_node_num as usize);
+        let mut order = Vec::with_capacity(res_node_num);
 
         while self.topological_sort(&mut order) {
             let res_cap = self.res_cap.as_ref();
@@ -611,12 +630,12 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             // Compute node ranks in the acyclic admissible network and store
             // the nodes in buckets
             rank.fill(0);
-            buckets.first.fill(None);
+            buckets.first.fill(Link::NONE);
             let mut top_rank = 0u32;
             for &u in order.iter().rev() {
                 let rank_u = rank[u];
                 let pi_u = pi[u];
-                for a in first_out[u]..first_out[u + 1] {
+                for a in ids(first_out[u]..first_out[u.next()]) {
                     if res_cap[a] > V::zero() {
                         let v = target[a];
                         let rc = cost[a] + pi_u - pi[v];
@@ -656,7 +675,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             for level in (1..=top_rank).rev() {
                 while let Some(u) = buckets.pop(level) {
                     let pi_u = pi[u];
-                    for a in first_out[u]..first_out[u + 1] {
+                    for a in ids(first_out[u]..first_out[u.next()]) {
                         if res_cap[a] <= V::zero() {
                             continue;
                         }
@@ -702,7 +721,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// Topologically sorts the admissible network by DFS into `order`,
     /// sources last. If the DFS finds an admissible cycle instead, cancels it
     /// and returns false.
-    fn topological_sort(&mut self, order: &mut Vec<u32>) -> bool {
+    fn topological_sort(&mut self, order: &mut Vec<NodeId>) -> bool {
         let pi = self.pi.as_ref();
         let target = self.target.as_ref();
         let cost = self.cost.as_ref();
@@ -713,43 +732,44 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         const MAX_CYCLE_CANCEL: usize = 1;
 
         let n = self.res_node_num;
-        let mut reached = vec![false; n as usize];
-        let mut processed = vec![false; n as usize];
-        let mut pred: Vec<Link> = vec![None; n as usize];
-        next_out.copy_from_slice(&first_out[..n as usize]);
+        let mut reached = IVec::<NodeId, bool>::filled(n, false);
+        let mut processed = IVec::<NodeId, bool>::filled(n, false);
+        let mut pred = IVec::<NodeId, Link<NodeId>>::filled(n, Link::NONE);
+        next_out.copy_from_slice(&first_out[..NodeId::new(n)]);
         order.clear();
-        let pred_of =
-            |pred: &[Link], u: u32| pred[u as usize].expect("DFS tree nodes have a pred").get();
+        let pred_of = |pred: &IVec<NodeId, Link<NodeId>>, u: NodeId| {
+            pred[u].get().expect("DFS tree nodes have a pred")
+        };
 
         let mut cycle_cnt = 0usize;
-        for start in 0..n {
-            if reached[start as usize] {
+        for start in first_ids::<NodeId>(n) {
+            if reached[start] {
                 continue;
             }
 
             // Start DFS search from this start node
-            pred[start as usize] = None;
+            pred[start] = Link::NONE;
             let mut tip = start;
             loop {
                 // Check the outgoing arcs of the current tip node
-                reached[tip as usize] = true;
+                reached[tip] = true;
                 let pi_tip = pi[tip];
                 let mut a = next_out[tip];
-                let mut last_out = first_out[tip + 1];
+                let mut last_out = first_out[tip.next()];
                 while a != last_out {
                     if res_cap[a] > V::zero() {
                         let v = target[a];
                         if cost[a] + pi_tip - pi[v] < L::zero() {
-                            if !reached[v as usize] {
+                            if !reached[v] {
                                 // A new node is reached
-                                reached[v as usize] = true;
-                                pred[v as usize] = link(tip);
+                                reached[v] = true;
+                                pred[v] = Link::to(tip);
                                 next_out[tip] = a;
                                 tip = v;
                                 a = next_out[tip];
-                                last_out = first_out[tip + 1];
+                                last_out = first_out[tip.next()];
                                 break;
-                            } else if !processed[v as usize] {
+                            } else if !processed[v] {
                                 // A cycle is found
                                 cycle_cnt += 1;
                                 next_out[tip] = a;
@@ -787,29 +807,29 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                                 if delta_node != tip {
                                     let mut u = tip;
                                     while u != delta_node {
-                                        reached[u as usize] = false;
+                                        reached[u] = false;
                                         u = pred_of(&pred, u);
                                     }
                                     tip = delta_node;
-                                    a = next_out[tip] + 1;
-                                    last_out = first_out[tip + 1];
+                                    a = next_out[tip].next();
+                                    last_out = first_out[tip.next()];
                                     break;
                                 }
                             }
                         }
                     }
-                    a += 1;
+                    a = a.next();
                 }
 
                 // Step back to the previous node
                 if a == last_out {
-                    processed[tip as usize] = true;
+                    processed[tip] = true;
                     order.push(tip);
-                    let Some(p) = pred[tip as usize] else {
+                    let Some(p) = pred[tip].get() else {
                         break;
                     };
-                    tip = p.get();
-                    next_out[tip] += 1;
+                    tip = p;
+                    next_out[tip] = next_out[tip].next();
                 }
             }
         }
@@ -839,9 +859,9 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             prev: self.bucket_prev.as_mut(),
         };
 
-        buckets.first.fill(None);
+        buckets.first.fill(Link::NONE);
         let mut total_excess = V::zero();
-        for i in 0..res_node_num {
+        for i in first_ids::<NodeId>(res_node_num) {
             if excess[i] < V::zero() {
                 rank[i] = 0;
                 buckets.link(i, 0);
@@ -861,7 +881,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             while let Some(u) = buckets.pop(r) {
                 // Search the incoming arcs of u
                 let pi_u = pi[u];
-                for a in first_out[u]..first_out[u + 1] {
+                for a in ids(first_out[u]..first_out[u.next()]) {
                     let ra = reverse[a];
                     if res_cap[ra] <= V::zero() {
                         continue;
@@ -936,8 +956,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let global_update_skip = self.global_update_interval(GLOBAL_UPDATE_FACTOR);
         let mut next_global_update_limit = global_update_skip;
 
-        let mut path: Vec<u32> = Vec::new();
-        let mut path_arc = vec![false; self.res_arc_num as usize];
+        let mut path: Vec<ArcId> = Vec::new();
+        let mut path_arc = IVec::filled(self.res_arc_num, false);
         let mut relabel_cnt = 0u64;
         let mut eps_phase_cnt = 0usize;
         while self.epsilon >= L::one() {
@@ -971,8 +991,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     fn augment_until(
         &mut self,
         max_length: usize,
-        path: &mut Vec<u32>,
-        path_arc: &mut [bool],
+        path: &mut Vec<ArcId>,
+        path_arc: &mut IVec<ArcId, bool>,
         relabel_cnt: &mut u64,
         relabel_limit: u64,
     ) -> bool {
@@ -1005,20 +1025,20 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             'path: while path.len() < max_length && excess[tip] >= V::zero() {
                 let mut min_red_cost = L::max_value();
                 let pi_tip = pi[tip];
-                let last_out = first_out[tip + 1];
-                for a in next_out[tip]..last_out {
+                let last_out = first_out[tip.next()];
+                for a in ids(next_out[tip]..last_out) {
                     if res_cap[a] > V::zero() {
                         let u = target[a];
                         let rc = cost[a] + pi_tip - pi[u];
                         if rc < L::zero() {
                             path.push(a);
                             next_out[tip] = a;
-                            if path_arc[a as usize] {
+                            if path_arc[a] {
                                 // A cycle is found, stop path search
                                 break 'path;
                             }
                             tip = u;
-                            path_arc[a as usize] = true;
+                            path_arc[a] = true;
                             continue 'path;
                         } else if rc < min_red_cost {
                             min_red_cost = rc;
@@ -1031,7 +1051,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                     let ra = reverse[*path.last().unwrap()];
                     min_red_cost = min_red_cost.min(cost[ra] + pi_tip - pi[target[ra]]);
                 }
-                for a in first_out[tip]..next_out[tip] {
+                for a in ids(first_out[tip]..next_out[tip]) {
                     if res_cap[a] > V::zero() {
                         let rc = cost[a] + pi_tip - pi[target[a]];
                         if rc < min_red_cost {
@@ -1046,7 +1066,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                 // Step back
                 if tip != start {
                     let pa = path.pop().unwrap();
-                    path_arc[pa as usize] = false;
+                    path_arc[pa] = false;
                     tip = source[pa];
                 }
             }
@@ -1056,7 +1076,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             for &pa in path.iter() {
                 let u = v;
                 v = target[pa];
-                path_arc[pa as usize] = false;
+                path_arc[pa] = false;
                 let delta = res_cap[pa].min(excess[u]);
                 res_cap[pa] -= delta;
                 res_cap[reverse[pa]] += delta;
@@ -1084,8 +1104,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         // A "hyper" node received only part of a push because it could not
         // pass the whole amount on; it is processed next and relabeled even
         // without excess.
-        let mut hyper = vec![false; self.res_node_num as usize];
-        let mut hyper_cost = vec![L::zero(); self.res_node_num as usize];
+        let mut hyper = IVec::<NodeId, bool>::filled(self.res_node_num, false);
+        let mut hyper_cost = IVec::<NodeId, L>::filled(self.res_node_num, L::zero());
         let mut relabel_cnt = 0u64;
         let mut eps_phase_cnt = 0usize;
         while self.epsilon >= L::one() {
@@ -1102,7 +1122,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                 'next_node: loop {
                     // Select an active node (FIFO selection)
                     let n = self.active_nodes[0];
-                    let last_out = self.first_out[n + 1];
+                    let last_out = self.first_out[n.next()];
                     let pi_n = self.pi[n];
                     let mut excess_used_up = false;
 
@@ -1119,7 +1139,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                                 // Push-look-ahead heuristic
                                 let mut ahead = -self.excess[t];
                                 let pi_t = self.pi[t];
-                                for ta in self.next_out[t]..self.first_out[t + 1] {
+                                for ta in ids(self.next_out[t]..self.first_out[t.next()]) {
                                     if self.res_cap[ta] > V::zero()
                                         && self.cost[ta] + pi_t - self.pi[self.target[ta]]
                                             < L::zero()
@@ -1136,14 +1156,14 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 
                                 // Push flow along the arc
                                 let r = self.reverse[a];
-                                if ahead < delta && !hyper[t as usize] {
+                                if ahead < delta && !hyper[t] {
                                     self.res_cap[a] -= ahead;
                                     self.res_cap[r] += ahead;
                                     self.excess[n] -= ahead;
                                     self.excess[t] += ahead;
                                     self.active_nodes.push_front(t);
-                                    hyper[t as usize] = true;
-                                    hyper_cost[t as usize] = self.cost[a] + pi_n - pi_t;
+                                    hyper[t] = true;
+                                    hyper_cost[t] = self.cost[a] + pi_n - pi_t;
                                     self.next_out[n] = a;
                                     continue 'next_node;
                                 }
@@ -1160,19 +1180,19 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                                     break;
                                 }
                             }
-                            a += 1;
+                            a = a.next();
                         }
                         self.next_out[n] = a;
                     }
 
                     // Relabel the node if it is still active (or hyper)
-                    if !excess_used_up && (self.excess[n] > V::zero() || hyper[n as usize]) {
-                        let mut min_red_cost = if hyper[n as usize] {
-                            -hyper_cost[n as usize]
+                    if !excess_used_up && (self.excess[n] > V::zero() || hyper[n]) {
+                        let mut min_red_cost = if hyper[n] {
+                            -hyper_cost[n]
                         } else {
                             L::max_value()
                         };
-                        for a in self.first_out[n]..last_out {
+                        for a in ids(self.first_out[n]..last_out) {
                             if self.res_cap[a] > V::zero() {
                                 let rc = self.cost[a] + pi_n - self.pi[self.target[a]];
                                 if rc < min_red_cost {
@@ -1182,7 +1202,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                         }
                         self.pi[n] -= min_red_cost + self.epsilon;
                         self.next_out[n] = self.first_out[n];
-                        hyper[n as usize] = false;
+                        hyper[n] = false;
                         relabel_cnt += 1;
                     }
                     break;
@@ -1190,7 +1210,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 
                 // Remove nodes that are neither active nor hyper
                 while let Some(&front) = self.active_nodes.front() {
-                    if self.excess[front] > V::zero() || hyper[front as usize] {
+                    if self.excess[front] > V::zero() || hyper[front] {
                         break;
                     }
                     self.active_nodes.pop_front();
@@ -1212,41 +1232,44 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 /// Doubly linked lists of nodes by rank; `first[r]` heads the list of rank
 /// `r`. A list head's `prev` entry is stale and never read.
 struct Buckets<'a> {
-    first: IMut<'a, Link>,
-    next: IMut<'a, Link>,
-    prev: IMut<'a, u32>,
+    first: IMut<'a, usize, Link<NodeId>>,
+    next: IMut<'a, NodeId, Link<NodeId>>,
+    prev: IMut<'a, NodeId, NodeId>,
 }
 
 impl Buckets<'_> {
     #[inline(always)]
-    fn unlink(&mut self, v: u32, r: u32) {
+    fn unlink(&mut self, v: NodeId, r: u32) {
         let next = self.next[v];
-        if self.first[r] == link(v) {
-            self.first[r] = next;
+        let first = &mut self.first[r as usize];
+        if *first == Link::to(v) {
+            *first = next;
         } else {
             let prev = self.prev[v];
             self.next[prev] = next;
-            if let Some(next) = next {
-                self.prev[next.get()] = prev;
+            if let Some(next) = next.get() {
+                self.prev[next] = prev;
             }
         }
     }
 
     #[inline(always)]
-    fn link(&mut self, v: u32, r: u32) {
-        let head = self.first[r];
+    fn link(&mut self, v: NodeId, r: u32) {
+        let first = &mut self.first[r as usize];
+        let head = *first;
+        *first = Link::to(v);
         self.next[v] = head;
-        if let Some(head) = head {
-            self.prev[head.get()] = v;
+        if let Some(head) = head.get() {
+            self.prev[head] = v;
         }
-        self.first[r] = link(v);
     }
 
     /// Removes and returns the head of the list of rank `r`.
     #[inline(always)]
-    fn pop(&mut self, r: u32) -> Option<u32> {
-        let head = self.first[r]?.get();
-        self.first[r] = self.next[head];
+    fn pop(&mut self, r: u32) -> Option<NodeId> {
+        let first = &mut self.first[r as usize];
+        let head = first.get()?;
+        *first = self.next[head];
         Some(head)
     }
 }

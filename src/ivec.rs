@@ -1,57 +1,198 @@
+use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFrom, RangeTo};
 
 use nonmax::NonMaxU32;
 
-/// An optional node or arc index, packed into four bytes by reserving
-/// `u32::MAX` as the niche for `None`.
-pub(crate) type Link = Option<NonMaxU32>;
+/// A dense index into the arrays of one kind of solver entity.
+pub(crate) trait Idx: Copy + Eq + Ord + Debug {
+    fn new(i: usize) -> Self;
 
-/// Links to index `i`.
-///
-/// Problems too large to leave `u32::MAX` free are rejected before solving,
-/// so every real index fits.
+    fn index(self) -> usize;
+
+    /// The indices in `range`, in order.
+    ///
+    /// Counting in the stored representation keeps the loop counter from
+    /// being truncated and re-extended on every array access.
+    fn ids(range: Range<Self>) -> impl DoubleEndedIterator<Item = Self> + Clone;
+}
+
+impl Idx for usize {
+    #[inline(always)]
+    fn new(i: usize) -> Self {
+        i
+    }
+
+    #[inline(always)]
+    fn index(self) -> usize {
+        self
+    }
+
+    #[inline(always)]
+    fn ids(range: Range<Self>) -> impl DoubleEndedIterator<Item = Self> + Clone {
+        range
+    }
+}
+
+macro_rules! id_type {
+    ($(#[$attr:meta])* $name:ident) => {
+        $(#[$attr])*
+        ///
+        /// Stored as a `u32` to halve the memory traffic of the index arrays
+        /// the solvers are bound by. Problems too large to leave `u32::MAX`
+        /// free are rejected before solving, so every real index fits and
+        /// that value stays available as the niche of [`Link`].
+        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub(crate) struct $name(u32);
+
+        impl Idx for $name {
+            #[inline(always)]
+            fn new(i: usize) -> Self {
+                debug_assert!(i < u32::MAX as usize);
+                $name(i as u32)
+            }
+
+            #[inline(always)]
+            fn index(self) -> usize {
+                self.0 as usize
+            }
+
+            #[inline(always)]
+            fn ids(range: Range<Self>) -> impl DoubleEndedIterator<Item = Self> + Clone {
+                (range.start.0..range.end.0).map($name)
+            }
+        }
+
+        impl $name {
+            #[inline(always)]
+            pub(crate) fn next(self) -> Self {
+                $name(self.0 + 1)
+            }
+
+            #[inline(always)]
+            pub(crate) fn prev(self) -> Self {
+                $name(self.0 - 1)
+            }
+        }
+    };
+}
+
+id_type!(
+    /// A node of a solver's internal graph.
+    NodeId
+);
+
+id_type!(
+    /// An arc of a solver's internal graph.
+    ArcId
+);
+
+/// The indices in `range`, in order.
 #[inline(always)]
-pub(crate) fn link(i: u32) -> Link {
-    debug_assert!(i != u32::MAX);
-    NonMaxU32::new(i)
+pub(crate) fn ids<I: Idx>(range: Range<I>) -> impl DoubleEndedIterator<Item = I> + Clone {
+    I::ids(range)
+}
+
+/// The first `len` indices.
+#[inline(always)]
+pub(crate) fn first_ids<I: Idx>(len: usize) -> impl DoubleEndedIterator<Item = I> + Clone {
+    I::ids(I::new(0)..I::new(len))
+}
+
+/// An optional index packed into four bytes, with `u32::MAX` as the niche
+/// for `None`.
+///
+/// Decoding costs an xor, so arrays walked as long chains of dependent loads
+/// are better off without it.
+pub(crate) struct Link<I>(Option<NonMaxU32>, PhantomData<I>);
+
+impl<I> Clone for Link<I> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<I> Copy for Link<I> {}
+
+impl<I> PartialEq for Link<I> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<I> Eq for Link<I> {}
+
+impl<I> Debug for Link<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<I: Idx> Link<I> {
+    pub(crate) const NONE: Self = Link(None, PhantomData);
+
+    #[inline(always)]
+    pub(crate) fn to(i: I) -> Self {
+        Link(NonMaxU32::new(i.index() as u32), PhantomData)
+    }
+
+    #[inline(always)]
+    pub(crate) fn get(self) -> Option<I> {
+        self.0.map(|i| I::new(i.get() as usize))
+    }
 }
 
 const CACHE_LINE: usize = 64;
 
-/// A `Vec` indexed by `u32`, so the solvers can store node and arc indices
-/// compactly and chain lookups like `thread[last_succ[u]]` without casts.
+/// A `Vec` indexed by `I`, so the solvers can store typed node and arc
+/// indices compactly and chain lookups like `thread[last_succ[u]]`.
 ///
 /// Each array in a solver gets a distinct `slot`, and its data starts that
 /// many cache lines into its allocation. Large allocations are page-aligned,
 /// so without the stagger, element `i` of every array would map to the same
 /// cache set; walks that touch several arrays at one index then evict each
 /// other, which measurably slows network simplex (by 40% on some inputs).
-#[derive(Clone, Debug, Default)]
-pub(crate) struct IVec<T> {
+#[derive(Clone, Debug)]
+pub(crate) struct IVec<I, T> {
     buf: Vec<T>,
     off: usize,
     slot: usize,
+    _index: PhantomData<I>,
 }
 
-impl<T> IVec<T> {
+impl<I, T> Default for IVec<I, T> {
+    fn default() -> Self {
+        Self::slot(0)
+    }
+}
+
+impl<I, T> IVec<I, T> {
     pub(crate) fn slot(slot: usize) -> Self {
         IVec {
             buf: Vec::new(),
             off: 0,
             slot,
+            _index: PhantomData,
         }
     }
 
-    pub(crate) fn as_mut(&mut self) -> IMut<'_, T> {
-        IMut(&mut self.buf[self.off..])
+    pub(crate) fn as_mut(&mut self) -> IMut<'_, I, T> {
+        IMut::new(&mut self.buf[self.off..])
     }
 
-    pub(crate) fn as_ref(&self) -> IRef<'_, T> {
-        IRef(&self.buf[self.off..])
+    pub(crate) fn as_ref(&self) -> IRef<'_, I, T> {
+        IRef::new(&self.buf[self.off..])
     }
 }
 
-impl<T: Clone> IVec<T> {
+impl<I, T: Clone> IVec<I, T> {
+    /// An unstaggered array of `len` copies of `value`, for temporaries.
+    pub(crate) fn filled(len: usize, value: T) -> Self {
+        let mut v = Self::slot(0);
+        v.reset(len, value);
+        v
+    }
+
     /// Resizes to `len` and overwrites every element with `value`.
     pub(crate) fn reset(&mut self, len: usize, value: T) {
         let per_line = (CACHE_LINE / size_of::<T>().max(1)).max(1);
@@ -61,70 +202,23 @@ impl<T: Clone> IVec<T> {
     }
 }
 
-impl<T> Index<u32> for IVec<T> {
+impl<I: Idx, T> Index<I> for IVec<I, T> {
     type Output = T;
 
     #[inline(always)]
-    fn index(&self, i: u32) -> &T {
-        &self.buf[self.off + i as usize]
+    fn index(&self, i: I) -> &T {
+        &self.buf[self.off + i.index()]
     }
 }
 
-impl<T> IndexMut<u32> for IVec<T> {
+impl<I: Idx, T> IndexMut<I> for IVec<I, T> {
     #[inline(always)]
-    fn index_mut(&mut self, i: u32) -> &mut T {
-        &mut self.buf[self.off + i as usize]
+    fn index_mut(&mut self, i: I) -> &mut T {
+        &mut self.buf[self.off + i.index()]
     }
 }
 
-// Range indexing, so sub-slices read like `v[..n]` despite the `u32` index
-// impls shadowing the slice's own.
-macro_rules! index_ranges {
-    ($($ty:ident),*) => {$(
-        impl<T> Index<$ty<usize>> for IVec<T> {
-            type Output = [T];
-
-            #[inline(always)]
-            fn index(&self, r: $ty<usize>) -> &[T] {
-                &(**self)[r]
-            }
-        }
-
-        impl<T> IndexMut<$ty<usize>> for IVec<T> {
-            #[inline(always)]
-            fn index_mut(&mut self, r: $ty<usize>) -> &mut [T] {
-                &mut (**self)[r]
-            }
-        }
-
-        impl<T> Index<$ty<usize>> for IMut<'_, T> {
-            type Output = [T];
-
-            #[inline(always)]
-            fn index(&self, r: $ty<usize>) -> &[T] {
-                &self.0[r]
-            }
-        }
-
-        impl<T> IndexMut<$ty<usize>> for IMut<'_, T> {
-            #[inline(always)]
-            fn index_mut(&mut self, r: $ty<usize>) -> &mut [T] {
-                &mut self.0[r]
-            }
-        }
-
-        impl<T> Index<$ty<usize>> for IRef<'_, T> {
-            type Output = [T];
-
-            #[inline(always)]
-            fn index(&self, r: $ty<usize>) -> &[T] {
-                &self.0[r]
-            }
-        }
-    )*};
-}
-
-impl<T> Deref for IVec<T> {
+impl<I, T> Deref for IVec<I, T> {
     type Target = [T];
 
     fn deref(&self) -> &[T] {
@@ -132,25 +226,45 @@ impl<T> Deref for IVec<T> {
     }
 }
 
-impl<T> DerefMut for IVec<T> {
+impl<I, T> DerefMut for IVec<I, T> {
     fn deref_mut(&mut self) -> &mut [T] {
         &mut self.buf[self.off..]
     }
 }
 
-/// A mutable slice indexed by `u32`.
+/// A mutable slice indexed by `I`.
 ///
 /// Hot loops borrow their arrays through these instead of indexing struct
 /// fields, so the slice's pointer and length can stay in registers.
-pub(crate) struct IMut<'a, T>(pub(crate) &'a mut [T]);
+pub(crate) struct IMut<'a, I, T>(&'a mut [T], PhantomData<I>);
 
-impl<T> IMut<'_, T> {
-    pub(crate) fn as_ref(&self) -> IRef<'_, T> {
-        IRef(self.0)
+impl<'a, I, T> IMut<'a, I, T> {
+    pub(crate) fn new(slice: &'a mut [T]) -> Self {
+        IMut(slice, PhantomData)
+    }
+
+    pub(crate) fn as_ref(&self) -> IRef<'_, I, T> {
+        IRef::new(self.0)
     }
 }
 
-impl<T> Deref for IMut<'_, T> {
+impl<I: Idx, T> Index<I> for IMut<'_, I, T> {
+    type Output = T;
+
+    #[inline(always)]
+    fn index(&self, i: I) -> &T {
+        &self.0[i.index()]
+    }
+}
+
+impl<I: Idx, T> IndexMut<I> for IMut<'_, I, T> {
+    #[inline(always)]
+    fn index_mut(&mut self, i: I) -> &mut T {
+        &mut self.0[i.index()]
+    }
+}
+
+impl<I, T> Deref for IMut<'_, I, T> {
     type Target = [T];
 
     fn deref(&self) -> &[T] {
@@ -158,33 +272,39 @@ impl<T> Deref for IMut<'_, T> {
     }
 }
 
-impl<T> DerefMut for IMut<'_, T> {
+impl<I, T> DerefMut for IMut<'_, I, T> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.0
     }
 }
 
-impl<T> Index<u32> for IMut<'_, T> {
+/// A shared slice indexed by `I`; see [`IMut`].
+pub(crate) struct IRef<'a, I, T>(&'a [T], PhantomData<I>);
+
+impl<'a, I, T> IRef<'a, I, T> {
+    pub(crate) fn new(slice: &'a [T]) -> Self {
+        IRef(slice, PhantomData)
+    }
+}
+
+impl<I, T> Clone for IRef<'_, I, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<I, T> Copy for IRef<'_, I, T> {}
+
+impl<I: Idx, T> Index<I> for IRef<'_, I, T> {
     type Output = T;
 
     #[inline(always)]
-    fn index(&self, i: u32) -> &T {
-        &self.0[i as usize]
+    fn index(&self, i: I) -> &T {
+        &self.0[i.index()]
     }
 }
 
-impl<T> IndexMut<u32> for IMut<'_, T> {
-    #[inline(always)]
-    fn index_mut(&mut self, i: u32) -> &mut T {
-        &mut self.0[i as usize]
-    }
-}
-
-/// A shared slice indexed by `u32`; see [`IMut`].
-#[derive(Clone, Copy)]
-pub(crate) struct IRef<'a, T>(pub(crate) &'a [T]);
-
-impl<T> Deref for IRef<'_, T> {
+impl<I, T> Deref for IRef<'_, I, T> {
     type Target = [T];
 
     fn deref(&self) -> &[T] {
@@ -192,13 +312,83 @@ impl<T> Deref for IRef<'_, T> {
     }
 }
 
-impl<T> Index<u32> for IRef<'_, T> {
-    type Output = T;
+// Indexing by a range of typed indices yields the plain sub-slice.
+macro_rules! index_ranges {
+    ($($range:ident),*) => {$(
+        impl<I: Idx, T> Index<$range<I>> for IVec<I, T> {
+            type Output = [T];
 
-    #[inline(always)]
-    fn index(&self, i: u32) -> &T {
-        &self.0[i as usize]
-    }
+            #[inline(always)]
+            fn index(&self, r: $range<I>) -> &[T] {
+                &(**self)[r.to_positions()]
+            }
+        }
+
+        impl<I: Idx, T> IndexMut<$range<I>> for IVec<I, T> {
+            #[inline(always)]
+            fn index_mut(&mut self, r: $range<I>) -> &mut [T] {
+                &mut (**self)[r.to_positions()]
+            }
+        }
+
+        impl<I: Idx, T> Index<$range<I>> for IMut<'_, I, T> {
+            type Output = [T];
+
+            #[inline(always)]
+            fn index(&self, r: $range<I>) -> &[T] {
+                &self.0[r.to_positions()]
+            }
+        }
+
+        impl<I: Idx, T> IndexMut<$range<I>> for IMut<'_, I, T> {
+            #[inline(always)]
+            fn index_mut(&mut self, r: $range<I>) -> &mut [T] {
+                &mut self.0[r.to_positions()]
+            }
+        }
+
+        impl<I: Idx, T> Index<$range<I>> for IRef<'_, I, T> {
+            type Output = [T];
+
+            #[inline(always)]
+            fn index(&self, r: $range<I>) -> &[T] {
+                &self.0[r.to_positions()]
+            }
+        }
+    )*};
 }
 
 index_ranges!(Range, RangeFrom, RangeTo);
+
+trait ToPositions {
+    type Positions;
+
+    fn to_positions(self) -> Self::Positions;
+}
+
+impl<I: Idx> ToPositions for Range<I> {
+    type Positions = Range<usize>;
+
+    #[inline(always)]
+    fn to_positions(self) -> Range<usize> {
+        self.start.index()..self.end.index()
+    }
+}
+
+impl<I: Idx> ToPositions for RangeFrom<I> {
+    type Positions = RangeFrom<usize>;
+
+    #[inline(always)]
+    fn to_positions(self) -> RangeFrom<usize> {
+        self.start.index()..
+    }
+}
+
+impl<I: Idx> ToPositions for RangeTo<I> {
+    type Positions = RangeTo<usize>;
+
+    #[inline(always)]
+    fn to_positions(self) -> RangeTo<usize> {
+        ..self.end.index()
+    }
+}

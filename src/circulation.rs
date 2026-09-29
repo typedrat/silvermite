@@ -5,16 +5,17 @@
 //! arc block lists its outgoing arcs (forward), then its incoming arcs
 //! (backward), then one arc to the artificial root.
 
+use crate::ivec::{ArcId, IMut, IRef, IVec, Idx, NodeId, first_ids, ids};
 use crate::{Error, Number};
 
 /// The residual graph layout the circulation reads, restricted to the real
 /// nodes `0..node_num`.
 pub(crate) struct Layout<'a> {
     pub node_num: usize,
-    pub first_out: &'a [u32],
-    pub forward: &'a [bool],
-    pub target: &'a [u32],
-    pub reverse: &'a [u32],
+    pub first_out: IRef<'a, NodeId, ArcId>,
+    pub forward: IRef<'a, ArcId, bool>,
+    pub target: IRef<'a, ArcId, NodeId>,
+    pub reverse: IRef<'a, ArcId, ArcId>,
 }
 
 /// Searches for a flow with `0 <= flow <= cap` on every arc and
@@ -25,22 +26,22 @@ pub(crate) struct Layout<'a> {
 /// Fails with [`Error::Infeasible`] if no such flow exists.
 pub(crate) fn circulation<V: Number>(
     g: &Layout<'_>,
-    arcs: &[u32],
-    cap: &[V],
-    supply: &[V],
-    flow: &mut [V],
+    arcs: &[ArcId],
+    cap: IRef<'_, ArcId, V>,
+    supply: IRef<'_, NodeId, V>,
+    mut flow: IMut<'_, ArcId, V>,
 ) -> Result<(), Error> {
     let n = g.node_num;
-    let mut excess: Vec<V> = supply[..n].to_vec();
+    let mut excess = IVec::<NodeId, V>::filled(n, V::zero());
+    excess.copy_from_slice(&supply[..NodeId::new(n)]);
 
     // Greedy initialization: send as much as the target still demands.
     // Arcs are visited newest-first; on inputs listed by source node, as
     // generator output usually is, insertion order leaves far more excess
     // for the push-relabel phase (100x slower on GOTO instances).
     for &e in arcs.iter().rev() {
-        let e = e as usize;
-        let t = g.target[e] as usize;
-        let s = g.target[g.reverse[e] as usize] as usize;
+        let t = g.target[e];
+        let s = g.target[g.reverse[e]];
         let up = cap[e];
         if -excess[t] >= up {
             flow[e] = up;
@@ -57,21 +58,19 @@ pub(crate) fn circulation<V: Number>(
     }
 
     let mut level = Elevator::new(n);
-    for (v, &ex) in (0..).zip(&excess) {
+    for (v, &ex) in first_ids::<NodeId>(n).zip(&*excess) {
         if ex > V::zero() {
             level.activate(v);
         }
     }
 
     while let Some(act) = level.highest_active() {
-        let act_u = act as usize;
         let actlevel = level.level(act);
-        let mut mlevel = n as u32;
-        let mut exc = excess[act_u];
+        let mut mlevel = n;
+        let mut exc = excess[act];
         let mut discharged = false;
 
-        let block = g.first_out[act_u] as usize..g.first_out[act_u + 1] as usize;
-        for j in block {
+        for j in ids(g.first_out[act]..g.first_out[act.next()]) {
             if g.forward[j] {
                 // Outgoing arc: push along it.
                 let v = g.target[j];
@@ -80,52 +79,50 @@ pub(crate) fn circulation<V: Number>(
                     continue;
                 }
                 if level.level(v) < actlevel {
-                    let v_u = v as usize;
                     if fc >= exc {
                         flow[j] += exc;
-                        excess[v_u] += exc;
-                        if !level.active(v) && excess[v_u] > V::zero() {
+                        excess[v] += exc;
+                        if !level.active(v) && excess[v] > V::zero() {
                             level.activate(v);
                         }
-                        excess[act_u] = V::zero();
+                        excess[act] = V::zero();
                         level.deactivate(act);
                         discharged = true;
                         break;
                     }
                     flow[j] = cap[j];
-                    excess[v_u] += fc;
-                    if !level.active(v) && excess[v_u] > V::zero() {
+                    excess[v] += fc;
+                    if !level.active(v) && excess[v] > V::zero() {
                         level.activate(v);
                     }
                     exc -= fc;
                 } else if level.level(v) < mlevel {
                     mlevel = level.level(v);
                 }
-            } else if (g.target[j] as usize) < n {
+            } else if g.target[j].index() < n {
                 // Incoming arc: cancel flow on it. The arc to the root is
                 // not part of the circulation's graph.
                 let v = g.target[j];
-                let e = g.reverse[j] as usize;
+                let e = g.reverse[j];
                 let fc = flow[e];
                 if fc <= V::zero() {
                     continue;
                 }
                 if level.level(v) < actlevel {
-                    let v_u = v as usize;
                     if fc >= exc {
                         flow[e] -= exc;
-                        excess[v_u] += exc;
-                        if !level.active(v) && excess[v_u] > V::zero() {
+                        excess[v] += exc;
+                        if !level.active(v) && excess[v] > V::zero() {
                             level.activate(v);
                         }
-                        excess[act_u] = V::zero();
+                        excess[act] = V::zero();
                         level.deactivate(act);
                         discharged = true;
                         break;
                     }
                     flow[e] = V::zero();
-                    excess[v_u] += fc;
-                    if !level.active(v) && excess[v_u] > V::zero() {
+                    excess[v] += fc;
+                    if !level.active(v) && excess[v] > V::zero() {
                         level.activate(v);
                     }
                     exc -= fc;
@@ -138,10 +135,10 @@ pub(crate) fn circulation<V: Number>(
             continue;
         }
 
-        excess[act_u] = exc;
+        excess[act] = exc;
         if exc <= V::zero() {
             level.deactivate(act);
-        } else if mlevel == n as u32 {
+        } else if mlevel == n {
             // No admissible arc can ever appear: `act` is behind a barrier.
             return Err(Error::Infeasible);
         } else {
@@ -162,13 +159,13 @@ pub(crate) fn circulation<V: Number>(
 /// segments `first[l]..first[l + 1]`; within a segment the active items come
 /// first, at `first[l]..active_end[l]`.
 struct Elevator {
-    max_level: u32,
-    items: Vec<u32>,
-    where_: Vec<usize>,
-    level: Vec<u32>,
+    max_level: usize,
+    items: Vec<NodeId>,
+    where_: IVec<NodeId, usize>,
+    level: IVec<NodeId, usize>,
     first: Vec<usize>,
     active_end: Vec<usize>,
-    highest_active: Option<u32>,
+    highest_active: Option<usize>,
 }
 
 impl Elevator {
@@ -178,11 +175,15 @@ impl Elevator {
         // Everything is on level 0, so every higher level starts at the end.
         let mut first = vec![item_num; item_num + 2];
         first[0] = 0;
+        let mut where_ = IVec::filled(item_num, 0);
+        for (w, i) in where_.iter_mut().zip(0..) {
+            *w = i;
+        }
         Elevator {
-            max_level: item_num as u32,
-            items: (0..item_num as u32).collect(),
-            where_: (0..item_num).collect(),
-            level: vec![0; item_num],
+            max_level: item_num,
+            items: first_ids(item_num).collect(),
+            where_,
+            level: IVec::filled(item_num, 0),
             active_end: first.clone(),
             first,
             highest_active: None,
@@ -192,8 +193,8 @@ impl Elevator {
     #[inline]
     fn swap(&mut self, i: usize, j: usize) {
         self.items.swap(i, j);
-        self.where_[self.items[i] as usize] = i;
-        self.where_[self.items[j] as usize] = j;
+        self.where_[self.items[i]] = i;
+        self.where_[self.items[j]] = j;
     }
 
     /// Moves the item at position `s` to position `p`.
@@ -205,60 +206,57 @@ impl Elevator {
     }
 
     #[inline]
-    fn copy_item(&mut self, item: u32, p: usize) {
+    fn copy_item(&mut self, item: NodeId, p: usize) {
         self.items[p] = item;
-        self.where_[item as usize] = p;
+        self.where_[item] = p;
     }
 
-    fn level(&self, i: u32) -> u32 {
-        self.level[i as usize]
+    fn level(&self, i: NodeId) -> usize {
+        self.level[i]
     }
 
-    fn active(&self, i: u32) -> bool {
-        self.where_[i as usize] < self.active_end[self.level(i) as usize]
+    fn active(&self, i: NodeId) -> bool {
+        self.where_[i] < self.active_end[self.level(i)]
     }
 
-    fn activate(&mut self, i: u32) {
+    fn activate(&mut self, i: NodeId) {
         let l = self.level(i);
-        let end = self.active_end[l as usize];
-        self.swap(self.where_[i as usize], end);
-        self.active_end[l as usize] += 1;
+        self.swap(self.where_[i], self.active_end[l]);
+        self.active_end[l] += 1;
         if self.highest_active.is_none_or(|h| l > h) {
             self.highest_active = Some(l);
         }
     }
 
-    fn deactivate(&mut self, i: u32) {
-        let l = self.level(i) as usize;
+    fn deactivate(&mut self, i: NodeId) {
+        let l = self.level(i);
         self.active_end[l] -= 1;
-        self.swap(self.where_[i as usize], self.active_end[l]);
+        self.swap(self.where_[i], self.active_end[l]);
         self.drop_empty_highest();
     }
 
     fn drop_empty_highest(&mut self) {
         while let Some(h) = self.highest_active {
-            if self.active_end[h as usize] > self.first[h as usize] {
+            if self.active_end[h] > self.first[h] {
                 break;
             }
             self.highest_active = h.checked_sub(1);
         }
     }
 
-    fn on_level(&self, l: u32) -> usize {
-        let l = l as usize;
+    fn on_level(&self, l: usize) -> usize {
         self.first[l + 1] - self.first[l]
     }
 
-    fn highest_active(&self) -> Option<u32> {
+    fn highest_active(&self) -> Option<NodeId> {
         self.highest_active
-            .map(|h| self.items[self.active_end[h as usize] - 1])
+            .map(|h| self.items[self.active_end[h] - 1])
     }
 
     /// Lifts the highest active item to `new_level`, shifting the level
     /// boundaries in between down by one slot.
-    fn lift_highest_active(&mut self, new_level: u32) {
-        let ha = self.highest_active.expect("an item is active") as usize;
-        let new_level_u = new_level as usize;
+    fn lift_highest_active(&mut self, new_level: usize) {
+        let ha = self.highest_active.expect("an item is active");
         self.active_end[ha] -= 1;
         let la = self.active_end[ha];
         let li = self.items[la];
@@ -267,13 +265,13 @@ impl Elevator {
         self.copy_pos(self.first[ha + 1], la);
         // The levels in between have no active items, so their active
         // prefixes stay empty as their segments shift down.
-        for l in ha + 1..new_level_u {
+        for l in ha + 1..new_level {
             self.first[l + 1] -= 1;
             self.copy_pos(self.first[l + 1], self.first[l]);
             self.active_end[l] -= 1;
         }
-        self.copy_item(li, self.first[new_level_u]);
-        self.level[li as usize] = new_level;
+        self.copy_item(li, self.first[new_level]);
+        self.level[li] = new_level;
         self.highest_active = Some(new_level);
         debug_assert!(new_level <= self.max_level);
     }

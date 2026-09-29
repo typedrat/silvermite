@@ -1,8 +1,86 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt;
 
 use crate::Number;
 use crate::ivec::{Idx, NodeId};
+
+macro_rules! handle {
+    ($(#[$attr:meta])* $name:ident) => {
+        $(#[$attr])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(usize);
+
+        impl $name {
+            pub const fn new(index: usize) -> Self {
+                $name(index)
+            }
+
+            pub const fn index(self) -> usize {
+                self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
+}
+
+handle!(
+    /// A node of a [`Problem`]. Nodes are numbered densely from zero in the
+    /// order they are added, so `Node::new(i)` is the `i`th node.
+    Node
+);
+
+handle!(
+    /// An arc of a [`Problem`]. Arcs are numbered densely from zero in the
+    /// order they are added, so `Arc::new(i)` is the `i`th arc.
+    Arc
+);
+
+/// Upper bound on the flow along an arc.
+///
+/// Plain numbers convert into finite capacities, so `add_arc` accepts either
+/// `5` or `Capacity::Infinite` as an upper bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Capacity<V> {
+    /// At most this much flow. `Finite(V::max_value())` is the same as
+    /// `Infinite`, since no flow of type `V` can exceed it.
+    Finite(V),
+    Infinite,
+}
+
+impl<V> From<V> for Capacity<V> {
+    fn from(v: V) -> Self {
+        Capacity::Finite(v)
+    }
+}
+
+impl<V: Number> Capacity<V> {
+    /// The finite bound, or `None` for infinite capacity.
+    pub fn finite(self) -> Option<V> {
+        match self {
+            Capacity::Finite(v) if v != V::max_value() => Some(v),
+            _ => None,
+        }
+    }
+
+    /// The solvers' representation, with `V::max_value()` for infinity.
+    fn to_raw(self) -> V {
+        self.finite().unwrap_or(V::max_value())
+    }
+
+    fn from_raw(v: V) -> Self {
+        if v == V::max_value() {
+            Capacity::Infinite
+        } else {
+            Capacity::Finite(v)
+        }
+    }
+}
 
 /// How node supplies constrain the flow balance `out(v) - in(v)` at each
 /// node `v`.
@@ -22,16 +100,19 @@ pub enum SupplyType {
     Leq,
 }
 
-/// A minimum cost flow problem over nodes and arcs numbered densely from
-/// zero in insertion order.
+/// A minimum cost flow problem.
 ///
-/// An upper bound of `V::max_value()` means the arc has infinite capacity.
+/// # Panics
+///
+/// Methods taking a [`Node`] or [`Arc`] panic if it is not part of the
+/// problem.
 #[derive(Clone, Debug, Default)]
 pub struct Problem<V, C> {
     pub(crate) supply: Vec<V>,
     pub(crate) source: Vec<NodeId>,
     pub(crate) target: Vec<NodeId>,
     pub(crate) lower: Vec<V>,
+    // `V::max_value()` for infinite capacity
     pub(crate) upper: Vec<V>,
     pub(crate) cost: Vec<C>,
     pub(crate) supply_type: SupplyType,
@@ -65,54 +146,68 @@ impl<V: Number, C: Number> Problem<V, C> {
         self.source.len()
     }
 
-    /// Adds a node with the given supply (negative for demand) and returns
-    /// its index.
-    pub fn add_node(&mut self, supply: V) -> usize {
-        self.supply.push(supply);
-        self.supply.len() - 1
+    /// Every node, in order.
+    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = Node> + ExactSizeIterator + use<V, C> {
+        (0..self.node_count()).map(Node::new)
     }
 
-    /// Adds an arc and returns its index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `source` or `target` is not a node of the problem.
-    pub fn add_arc(&mut self, source: usize, target: usize, lower: V, upper: V, cost: C) -> usize {
+    /// Every arc, in order.
+    pub fn arcs(&self) -> impl DoubleEndedIterator<Item = Arc> + ExactSizeIterator + use<V, C> {
+        (0..self.arc_count()).map(Arc::new)
+    }
+
+    /// Adds a node with the given supply (negative for demand).
+    pub fn add_node(&mut self, supply: V) -> Node {
+        self.supply.push(supply);
+        Node::new(self.supply.len() - 1)
+    }
+
+    /// Adds an arc from `source` to `target` whose flow must lie between
+    /// `lower` and `upper`.
+    pub fn add_arc(
+        &mut self,
+        source: Node,
+        target: Node,
+        lower: V,
+        upper: impl Into<Capacity<V>>,
+        cost: C,
+    ) -> Arc {
         let n = self.node_count();
         assert!(
-            source < n,
+            source.index() < n,
             "arc source {source} out of range (node count {n})"
         );
         assert!(
-            target < n,
+            target.index() < n,
             "arc target {target} out of range (node count {n})"
         );
-        self.source.push(NodeId::new(source));
-        self.target.push(NodeId::new(target));
+        self.source.push(NodeId::new(source.index()));
+        self.target.push(NodeId::new(target.index()));
         self.lower.push(lower);
-        self.upper.push(upper);
+        self.upper.push(upper.into().to_raw());
         self.cost.push(cost);
-        self.source.len() - 1
+        Arc::new(self.source.len() - 1)
     }
 
-    pub fn supply(&self, node: usize) -> V {
-        self.supply[node]
+    pub fn supply(&self, node: Node) -> V {
+        self.supply[node.index()]
     }
 
+    /// The supply of every node, indexed by [`Node::index`].
     pub fn supplies(&self) -> &[V] {
         &self.supply
     }
 
-    pub fn set_supply(&mut self, node: usize, supply: V) {
-        self.supply[node] = supply;
+    pub fn set_supply(&mut self, node: Node, supply: V) {
+        self.supply[node.index()] = supply;
     }
 
     /// Replaces all supplies with a single `amount` sent from `source` to
     /// `target`.
-    pub fn set_st_supply(&mut self, source: usize, target: usize, amount: V) {
+    pub fn set_st_supply(&mut self, source: Node, target: Node, amount: V) {
         self.supply.fill(V::zero());
-        self.supply[source] = amount;
-        self.supply[target] = -amount;
+        self.supply[source.index()] = amount;
+        self.supply[target.index()] = -amount;
     }
 
     pub fn supply_type(&self) -> SupplyType {
@@ -123,33 +218,33 @@ impl<V: Number, C: Number> Problem<V, C> {
         self.supply_type = supply_type;
     }
 
-    pub fn source(&self, arc: usize) -> usize {
-        self.source[arc].index()
+    pub fn source(&self, arc: Arc) -> Node {
+        Node::new(self.source[arc.index()].index())
     }
 
-    pub fn target(&self, arc: usize) -> usize {
-        self.target[arc].index()
+    pub fn target(&self, arc: Arc) -> Node {
+        Node::new(self.target[arc.index()].index())
     }
 
-    pub fn lower(&self, arc: usize) -> V {
-        self.lower[arc]
+    pub fn lower(&self, arc: Arc) -> V {
+        self.lower[arc.index()]
     }
 
-    pub fn upper(&self, arc: usize) -> V {
-        self.upper[arc]
+    pub fn upper(&self, arc: Arc) -> Capacity<V> {
+        Capacity::from_raw(self.upper[arc.index()])
     }
 
-    pub fn cost(&self, arc: usize) -> C {
-        self.cost[arc]
+    pub fn cost(&self, arc: Arc) -> C {
+        self.cost[arc.index()]
     }
 
-    pub fn set_bounds(&mut self, arc: usize, lower: V, upper: V) {
-        self.lower[arc] = lower;
-        self.upper[arc] = upper;
+    pub fn set_bounds(&mut self, arc: Arc, lower: V, upper: impl Into<Capacity<V>>) {
+        self.lower[arc.index()] = lower;
+        self.upper[arc.index()] = upper.into().to_raw();
     }
 
-    pub fn set_cost(&mut self, arc: usize, cost: C) {
-        self.cost[arc] = cost;
+    pub fn set_cost(&mut self, arc: Arc, cost: C) {
+        self.cost[arc.index()] = cost;
     }
 
     /// Checks the invariants every solver relies on.
@@ -168,7 +263,7 @@ impl<V: Number, C: Number> Problem<V, C> {
             .zip(&self.upper)
             .position(|(lower, upper)| upper < lower)
         {
-            return Err(Error::InvalidBounds { arc });
+            return Err(Error::InvalidBounds { arc: Arc::new(arc) });
         }
         Ok(())
     }
@@ -191,20 +286,20 @@ pub struct Solution<V, C> {
 }
 
 impl<V: Number, C: Number> Solution<V, C> {
-    pub fn flow(&self, arc: usize) -> V {
-        self.flow[arc]
+    pub fn flow(&self, arc: Arc) -> V {
+        self.flow[arc.index()]
     }
 
-    /// Flow on every arc, indexed by arc.
+    /// Flow on every arc, indexed by [`Arc::index`].
     pub fn flows(&self) -> &[V] {
         &self.flow
     }
 
-    pub fn potential(&self, node: usize) -> C {
-        self.potential[node]
+    pub fn potential(&self, node: Node) -> C {
+        self.potential[node.index()]
     }
 
-    /// Potential of every node, indexed by node.
+    /// Potential of every node, indexed by [`Node::index`].
     ///
     /// With `pi` as the potentials, every arc `(u, v)` satisfies complementary
     /// slackness for the reduced cost `cost + pi[u] - pi[v]`: arcs with
@@ -219,6 +314,8 @@ impl<V: Number, C: Number> Solution<V, C> {
         self.total_cost
     }
 
+    /// The flows and potentials, indexed like [`flows`](Self::flows) and
+    /// [`potentials`](Self::potentials).
     pub fn into_parts(self) -> (Vec<V>, Vec<C>) {
         (self.flow, self.potential)
     }
@@ -241,14 +338,14 @@ pub enum Error {
     Unbounded,
     /// The arc's lower bound exceeds its upper bound.
     #[error("arc {arc} has a lower bound greater than its upper bound")]
-    InvalidBounds { arc: usize },
+    InvalidBounds { arc: Arc },
     /// The problem has more nodes or arcs than the solvers can index.
     #[error("the problem has too many nodes or arcs")]
     TooLarge,
     /// Cost scaling's internal costs (arc costs multiplied by the node count
     /// and scaling factor), or that multiplier itself, do not fit in its
-    /// large cost type. Use a wider
-    /// large cost type, such as `CostScaling<V, C, i128>`.
+    /// large cost type. Use a wider large cost type, such as
+    /// `CostScaling<V, C, i128>`.
     #[error("scaled arc costs overflow the large cost type")]
     Overflow,
 }

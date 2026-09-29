@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Solver, check_solution};
-use silvermite::{Error, Number, Problem, SupplyType};
+use silvermite::{Capacity, Error, Node, Number, Problem, SupplyType};
 
 // Columns: source, target, cost, cap, low1, low2, low3 (1-based node labels)
 const ARCS: [[i32; 7]; 21] = [
@@ -73,10 +73,15 @@ enum Upper {
     Infinite,
 }
 
+/// The node with a 1-based label from the tables above.
+fn node(label: i32) -> Node {
+    Node::new(label as usize - 1)
+}
+
 fn main_graph<T: Number>(lower: usize, upper: Upper, cost: Cost, supply: usize) -> Problem<T, T> {
-    let mut p = Problem::new(SUPPLIES.len());
-    for (v, row) in SUPPLIES.iter().enumerate() {
-        p.set_supply(v, T::from_i128(row[supply] as i128));
+    let mut p = Problem::new(0);
+    for row in &SUPPLIES {
+        p.add_node(T::from_i128(row[supply] as i128));
     }
     for a in &ARCS {
         let t = |x: i32| T::from_i128(x as i128);
@@ -86,43 +91,38 @@ fn main_graph<T: Number>(lower: usize, upper: Upper, cost: Cost, supply: usize) 
             t(a[3 + lower])
         };
         let up = match upper {
-            Upper::Cap => t(a[3]),
-            Upper::Infinite => T::max_value(),
+            Upper::Cap => Capacity::Finite(t(a[3])),
+            Upper::Infinite => Capacity::Infinite,
         };
         let c = match cost {
             Cost::Table => t(a[2]),
             Cost::Unit => T::one(),
         };
-        p.add_arc(a[0] as usize - 1, a[1] as usize - 1, low, up, c);
+        p.add_arc(node(a[0]), node(a[1]), low, up, c);
     }
     p
 }
 
 fn neg1_graph<T: Number>(lower: usize, upper: Option<i32>) -> Problem<T, T> {
     let t = |x: i32| T::from_i128(x as i128);
-    let mut p = Problem::new(NEG1_SUPPLY.len());
-    for (v, &s) in NEG1_SUPPLY.iter().enumerate() {
-        p.set_supply(v, t(s));
+    let mut p = Problem::new(0);
+    for &s in &NEG1_SUPPLY {
+        p.add_node(t(s));
     }
     for a in &NEG1_ARCS {
-        let up = upper.map_or(T::max_value(), t);
-        p.add_arc(
-            a[0] as usize - 1,
-            a[1] as usize - 1,
-            t(a[3 + lower]),
-            up,
-            t(a[2]),
-        );
+        let up = upper.map_or(Capacity::Infinite, |u| Capacity::Finite(t(u)));
+        p.add_arc(node(a[0]), node(a[1]), t(a[3 + lower]), up, t(a[2]));
     }
     p
 }
 
 fn neg2_graph<T: Number>(upper: Option<i32>) -> Problem<T, T> {
     let t = |x: i32| T::from_i128(x as i128);
-    let mut p = Problem::new(2);
-    p.set_supply(0, t(100));
-    p.set_supply(1, t(-300));
-    p.add_arc(0, 1, T::zero(), upper.map_or(T::max_value(), t), t(-1));
+    let mut p = Problem::new(0);
+    let s = p.add_node(t(100));
+    let d = p.add_node(t(-300));
+    let up = upper.map_or(Capacity::Infinite, |u| Capacity::Finite(t(u)));
+    p.add_arc(s, d, T::zero(), up, t(-1));
     p
 }
 

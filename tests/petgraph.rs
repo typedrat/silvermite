@@ -29,7 +29,7 @@ fn stable_graph_with_holes() {
         &g,
         |e| ArcData {
             lower: 0,
-            upper: 5,
+            upper: 5.into(),
             cost: *e.weight(),
         },
         |n| g[n],

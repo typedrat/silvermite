@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use silvermite::{CostScaling, Error, Method, NetworkSimplex, Problem, SupplyType};
+use silvermite::{Capacity, CostScaling, Error, Method, NetworkSimplex, Node, Problem, SupplyType};
 
 fn read_dimacs(text: &str) -> Problem<i64, i64> {
     let mut problem = Problem::new(0);
@@ -21,13 +21,19 @@ fn read_dimacs(text: &str) -> Problem<i64, i64> {
             fields.next(); // problem type
         }
         let nums: Vec<i64> = fields.map(|f| f.parse().expect("bad number")).collect();
+        // DIMACS node ids start at 1.
+        let node = |id: i64| Node::new(id as usize - 1);
         match (tag, nums.as_slice()) {
             (Some("p"), &[n, m]) => problem = Problem::with_capacity(n as usize, m as usize),
-            (Some("n"), &[id, supply]) => problem.set_supply(id as usize - 1, supply),
+            (Some("n"), &[id, supply]) => problem.set_supply(node(id), supply),
             (Some("a"), &[u, v, low, cap, cost]) => {
                 // A capacity below the lower bound means "infinite".
-                let upper = if cap >= low { cap } else { i64::MAX };
-                problem.add_arc(u as usize - 1, v as usize - 1, low, upper, cost);
+                let upper = if cap >= low {
+                    Capacity::Finite(cap)
+                } else {
+                    Capacity::Infinite
+                };
+                problem.add_arc(node(u), node(v), low, upper, cost);
             }
             _ => panic!("malformed line: {line}"),
         }

@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Rng, Solver, check_solution};
-use silvermite::{Error, Number, Problem, SupplyType};
+use silvermite::{Capacity, Error, Node, Number, Problem, SupplyType};
 
 /// A small random instance mixing lower bounds (some negative), infinite
 /// capacities, negative costs, self-loops, parallel arcs, and all three
@@ -18,10 +18,11 @@ fn random_problem<T: Number>(
     let n = rng.range(1, 25) as usize;
     let m = rng.range(n as i64 - 1, 4 * n as i64) as usize;
     let mut p = Problem::new(n);
+    let random_node = |rng: &mut Rng| Node::new(rng.range(0, n as i64 - 1) as usize);
     let mut negative_infinite = false;
     for _ in 0..m {
-        let s = rng.range(0, n as i64 - 1) as usize;
-        let d = rng.range(0, n as i64 - 1) as usize;
+        let s = random_node(rng);
+        let d = random_node(rng);
         let lower = if rng.chance(0.15) {
             rng.range(-5, 5)
         } else {
@@ -29,9 +30,9 @@ fn random_problem<T: Number>(
         };
         let infinite = rng.chance(0.2);
         let upper = if infinite {
-            T::max_value()
+            Capacity::Infinite
         } else {
-            t(lower + rng.range(0, 20))
+            Capacity::Finite(t(lower + rng.range(0, 20)))
         };
         let mut cost = rng.range(-10, 30);
         if infinite && cost < 0 {
@@ -46,7 +47,7 @@ fn random_problem<T: Number>(
 
     // Random supplies, then nudge the total into the chosen regime.
     let mut total = 0;
-    for v in 0..n {
+    for v in p.nodes() {
         let s = if rng.chance(0.3) { rng.range(-8, 8) } else { 0 };
         p.set_supply(v, t(s));
         total += s;
@@ -57,7 +58,7 @@ fn random_problem<T: Number>(
         1 => -total - rng.range(0, 5),
         _ => -total + rng.range(0, 5),
     };
-    let v = rng.range(0, n as i64 - 1) as usize;
+    let v = random_node(rng);
     let supply = p.supply(v).to_i128() as i64;
     p.set_supply(v, t(supply + fix));
     p.set_supply_type(if regime == 2 {

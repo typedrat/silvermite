@@ -21,7 +21,7 @@
 //!
 //! let (problem, ids) = from_graph(
 //!     &g,
-//!     |e| ArcData { lower: 0, upper: e.weight().0, cost: e.weight().1 },
+//!     |e| ArcData { lower: 0, upper: e.weight().0.into(), cost: e.weight().1 },
 //!     |n| g[n],
 //! );
 //! let solution = solve(&problem, Algorithm::NetworkSimplex).unwrap();
@@ -38,14 +38,13 @@ use nonmax::NonMaxU32;
 use petgraph::Directed;
 use petgraph::visit::{EdgeRef, GraphProp, IntoEdgeReferences, IntoNodeIdentifiers, NodeIndexable};
 
-use crate::{Number, Problem, Solution};
+use crate::{Arc, Capacity, Node, Number, Problem, Solution};
 
 /// Bounds and cost of one arc.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ArcData<V, C> {
     pub lower: V,
-    /// `V::max_value()` means infinite capacity.
-    pub upper: V,
+    pub upper: Capacity<V>,
     pub cost: C,
 }
 
@@ -59,13 +58,13 @@ pub struct IdMap<N, E> {
 
 impl<N: Copy, E: Copy> IdMap<N, E> {
     /// The graph node behind problem node `node`.
-    pub fn node_id(&self, node: usize) -> N {
-        self.nodes[node]
+    pub fn node_id(&self, node: Node) -> N {
+        self.nodes[node.index()]
     }
 
     /// The graph edge behind problem arc `arc`.
-    pub fn edge_id(&self, arc: usize) -> E {
-        self.edges[arc]
+    pub fn edge_id(&self, arc: Arc) -> E {
+        self.edges[arc.index()]
     }
 
     /// The flow on every graph edge.
@@ -116,9 +115,8 @@ where
         problem.add_node(supply(n));
     }
     let dense_index = |n| {
-        dense[graph.to_index(n)]
-            .expect("edge endpoints are graph nodes")
-            .get() as usize
+        let i = dense[graph.to_index(n)].expect("edge endpoints are graph nodes");
+        Node::new(i.get() as usize)
     };
 
     let mut edges = Vec::new();

@@ -19,24 +19,29 @@ Every solve returns an optimal flow and optimal node potentials, which certify
 optimality through complementary slackness.
 
 ```rust
-use silvermite::{Algorithm, Problem, solve};
+use silvermite::{Algorithm, Capacity, Problem, solve};
 
-// Ship 10 units from node 0 to node 3 over two routes.
-let mut p = Problem::<i64, i64>::new(4);
-p.set_st_supply(0, 3, 10);
-p.add_arc(0, 1, 0, 6, 2); // source, target, lower, upper, cost
-p.add_arc(1, 3, 0, 6, 2);
-p.add_arc(0, 2, 0, 8, 3);
-p.add_arc(2, 3, 0, 8, 3);
+// Ship 10 units from s to t over two routes, plus a pricier direct arc
+// with no capacity limit.
+let mut p = Problem::<i64, i64>::new(0);
+let [s, a, b, t] = [10, 0, 0, -10].map(|supply| p.add_node(supply));
+let sa = p.add_arc(s, a, 0, 6, 2); // source, target, lower, upper, cost
+p.add_arc(a, t, 0, 6, 2);
+p.add_arc(s, b, 0, 3, 3);
+p.add_arc(b, t, 0, 3, 3);
+let st = p.add_arc(s, t, 0, Capacity::Infinite, 7);
 
 let solution = solve(&p, Algorithm::NetworkSimplex).unwrap();
-assert_eq!(solution.flows(), &[6, 6, 4, 4]);
-assert_eq!(solution.total_cost(), 48);
+assert_eq!(solution.flow(sa), 6);
+assert_eq!(solution.flow(st), 1);
+assert_eq!(solution.total_cost(), 6 * 4 + 3 * 6 + 7);
 ```
 
-Flow and cost types can be any signed primitive integers. An upper bound of
-`V::max_value()` means infinite capacity. Solver instances keep their buffers
-between calls to `solve`, so reuse one when solving many problems.
+Flow and cost types can be any signed primitive integers. Nodes and arcs are
+`Node` and `Arc` handles, numbered densely from zero in insertion order, and
+upper bounds are a `Capacity`, which plain numbers convert into. Solver
+instances keep their buffers between calls to `solve`, so reuse one when
+solving many problems.
 
 The crate is plain safe Rust, `no_std` (it needs only `alloc`), and works on
 32-bit targets, including `wasm32-unknown-unknown`; the test suite passes on
@@ -46,7 +51,7 @@ The crate is plain safe Rust, `no_std` (it needs only `alloc`), and works on
 
 With the `petgraph` feature, `silvermite::petgraph::from_graph` builds a
 `Problem` from any directed petgraph graph and returns an `IdMap` for reading
-flows and potentials back by `EdgeId` and `NodeId`. Graphs with index holes,
+flows and potentials back by the graph's own edge and node ids. Graphs with index holes,
 such as a `StableGraph` after removals, are compacted.
 
 ## Differences from LEMON

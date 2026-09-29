@@ -14,23 +14,25 @@
 //! switching.
 //!
 //! ```
-//! use silvermite::{Algorithm, Problem, solve};
+//! use silvermite::{Algorithm, Capacity, Problem, solve};
 //!
-//! // Ship 10 units from node 0 to node 3 over two routes.
-//! let mut p = Problem::<i64, i64>::new(4);
-//! p.set_st_supply(0, 3, 10);
-//! p.add_arc(0, 1, 0, 6, 2);
-//! p.add_arc(1, 3, 0, 6, 2);
-//! p.add_arc(0, 2, 0, 8, 3);
-//! p.add_arc(2, 3, 0, 8, 3);
+//! // Ship 10 units from s to t over two routes, plus a pricier direct arc
+//! // with no capacity limit.
+//! let mut p = Problem::<i64, i64>::new(0);
+//! let [s, a, b, t] = [10, 0, 0, -10].map(|supply| p.add_node(supply));
+//! let sa = p.add_arc(s, a, 0, 6, 2); // source, target, lower, upper, cost
+//! p.add_arc(a, t, 0, 6, 2);
+//! p.add_arc(s, b, 0, 3, 3);
+//! p.add_arc(b, t, 0, 3, 3);
+//! let st = p.add_arc(s, t, 0, Capacity::Infinite, 7);
 //!
 //! let solution = solve(&p, Algorithm::NetworkSimplex).unwrap();
-//! assert_eq!(solution.flows(), &[6, 6, 4, 4]);
-//! assert_eq!(solution.total_cost(), 48);
+//! assert_eq!(solution.flow(sa), 6);
+//! assert_eq!(solution.flow(st), 1);
+//! assert_eq!(solution.total_cost(), 6 * 4 + 3 * 6 + 7);
 //! ```
 //!
-//! Flow and cost types are any signed primitive integers (see [`Number`]);
-//! `V::max_value()` as an upper bound means infinite capacity.
+//! Flow and cost types are any signed primitive integers (see [`Number`]).
 //!
 //! With the `petgraph` feature, the [`petgraph`](crate::petgraph) module
 //! builds problems from petgraph graphs.
@@ -56,7 +58,7 @@ pub mod petgraph;
 pub use cost_scaling::{CostScaling, Method};
 pub use network_simplex::{NetworkSimplex, PivotRule};
 pub use num::Number;
-pub use problem::{Error, Problem, Solution, SupplyType};
+pub use problem::{Arc, Capacity, Error, Node, Problem, Solution, SupplyType};
 
 /// Which solver [`solve`] uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

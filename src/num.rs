@@ -8,8 +8,7 @@ use num_traits::{AsPrimitive, NumAssign, PrimInt, Signed};
 ///
 /// Implemented for every type that satisfies the bounds, which in practice
 /// means `i8` through `i128` and `isize`. Floating-point types are excluded
-/// on purpose: the solvers rely on exact arithmetic, and `max_value()`
-/// doubles as the "infinite capacity" marker.
+/// on purpose: the solvers rely on exact arithmetic.
 ///
 /// Every conversion into a `Number` requires the value to fit: debug builds
 /// panic if it does not, and release builds truncate like `as`.

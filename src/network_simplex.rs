@@ -115,16 +115,17 @@ struct Exchange {
 /// to [`solve`](Self::solve), so reuse one instance for repeated solves.
 ///
 /// ```
-/// use silvermite::{NetworkSimplex, Problem};
+/// use silvermite::{Capacity, NetworkSimplex, Problem};
 ///
-/// let mut p = Problem::<i64, i64>::new(3);
-/// p.set_st_supply(0, 2, 5);
-/// p.add_arc(0, 1, 0, 4, 1);
-/// p.add_arc(1, 2, 0, 4, 1);
-/// p.add_arc(0, 2, 0, i64::MAX, 3);
+/// let mut p = Problem::<i64, i64>::new(0);
+/// let [s, a, t] = [5, 0, -5].map(|supply| p.add_node(supply));
+/// p.add_arc(s, a, 0, 4, 1);
+/// p.add_arc(a, t, 0, 4, 1);
+/// let direct = p.add_arc(s, t, 0, Capacity::Infinite, 3);
 ///
 /// let solution = NetworkSimplex::new().solve(&p).unwrap();
 /// assert_eq!(solution.flows(), &[4, 4, 1]);
+/// assert_eq!(solution.flow(direct), 1);
 /// assert_eq!(solution.total_cost(), 11);
 /// ```
 #[derive(Clone, Debug)]

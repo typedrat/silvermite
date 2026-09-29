@@ -84,6 +84,9 @@ relabel steps, with these exceptions:
   primal feasibility, complementary slackness, and dual objective.
 - `tools/compare.py` runs the solvers against a C++ build of LEMON
   (`tools/lemon-ref`) on generated instances and on the benchmark suite.
+- `tools/ab_builds.py` compares two builds of `solve_dimacs`, by interleaved
+  timing or, with `--instructions`, by `perf stat` instruction counts, which
+  are deterministic enough to catch regressions of a fraction of a percent.
 
 ## Benchmarks
 

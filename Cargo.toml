@@ -1,0 +1,25 @@
+[package]
+name = "silvermite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Minimum cost flow solvers (network simplex and cost scaling) ported from LEMON"
+license = "BSL-1.0"
+keywords = ["network-flow", "min-cost-flow", "network-simplex", "optimization", "graph"]
+categories = ["algorithms", "mathematics"]
+
+[features]
+petgraph = ["dep:petgraph"]
+
+[dependencies]
+num-traits = { version = "0.2.19", default-features = false, features = ["i128"] }
+petgraph = { version = "0.8", optional = true, default-features = false }
+
+[dev-dependencies]
+petgraph = { version = "0.8", default-features = false, features = ["stable_graph"] }
+
+[profile.release]
+debug = 1
+
+[package.metadata.docs.rs]
+all-features = true

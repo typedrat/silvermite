@@ -1,0 +1,2 @@
+#define LEMON_VERSION "1.3.1"
+#define LEMON_HAVE_LONG_LONG 1

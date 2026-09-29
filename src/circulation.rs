@@ -7,6 +7,8 @@
 
 use crate::ivec::{ArcId, IMut, IRef, IdVec, Idx, NodeId, first_ids, ids};
 use crate::{Error, Number};
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// The residual graph layout the circulation reads, restricted to the real
 /// nodes `0..node_num`.

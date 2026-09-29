@@ -1,5 +1,7 @@
 use crate::Number;
 use crate::ivec::{Idx, NodeId};
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// How node supplies constrain the flow balance `out(v) - in(v)` at each
 /// node `v`.

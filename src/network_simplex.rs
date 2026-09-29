@@ -6,9 +6,11 @@
 //! node connects to every node by an artificial arc, so the initial tree is
 //! always a feasible basis for the extended problem.
 
-use std::hint::cold_path;
-use std::iter;
-use std::ops::{ControlFlow, Range};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::hint::cold_path;
+use core::iter;
+use core::ops::{ControlFlow, Range};
 
 use itertools::izip;
 
@@ -1003,10 +1005,13 @@ trait Pivot<C> {
     fn find_entering_arc(&mut self, view: &PivotView<'_, C>) -> Option<usize>;
 }
 
+// LEMON sizes its lists by floating-point factors of `sqrt(m)`; the integer
+// forms below compute exactly the same values without `std`.
+
+/// About `sqrt(m)`.
 fn block_size(search_arc_num: usize) -> usize {
-    const BLOCK_SIZE_FACTOR: f64 = 1.0;
     const MIN_BLOCK_SIZE: usize = 10;
-    ((BLOCK_SIZE_FACTOR * (search_arc_num as f64).sqrt()) as usize).max(MIN_BLOCK_SIZE)
+    search_arc_num.isqrt().max(MIN_BLOCK_SIZE)
 }
 
 struct FirstEligible {
@@ -1115,14 +1120,13 @@ struct CandidateList {
 
 impl<C: Number> Pivot<C> for CandidateList {
     fn new(search_arc_num: usize) -> Self {
-        const LIST_LENGTH_FACTOR: f64 = 0.25;
         const MIN_LIST_LENGTH: usize = 10;
-        const MINOR_LIMIT_FACTOR: f64 = 0.1;
         const MIN_MINOR_LIMIT: usize = 3;
 
-        let list_length =
-            ((LIST_LENGTH_FACTOR * (search_arc_num as f64).sqrt()) as usize).max(MIN_LIST_LENGTH);
-        let minor_limit = ((MINOR_LIMIT_FACTOR * list_length as f64) as usize).max(MIN_MINOR_LIMIT);
+        // A quarter of `sqrt(m)` long, rebuilt after a tenth as many minor
+        // iterations.
+        let list_length = (search_arc_num.isqrt() / 4).max(MIN_LIST_LENGTH);
+        let minor_limit = (list_length / 10).max(MIN_MINOR_LIMIT);
         CandidateList {
             candidates: Vec::with_capacity(list_length),
             list_length,
@@ -1202,11 +1206,11 @@ struct AlteringList<C> {
 
 impl<C: Number> Pivot<C> for AlteringList<C> {
     fn new(search_arc_num: usize) -> Self {
-        const HEAD_LENGTH_FACTOR: f64 = 0.01;
         const MIN_HEAD_LENGTH: usize = 3;
 
+        // Keeps a hundredth of a block between iterations.
         let block_size = block_size(search_arc_num);
-        let head_length = ((HEAD_LENGTH_FACTOR * block_size as f64) as usize).max(MIN_HEAD_LENGTH);
+        let head_length = (block_size / 100).max(MIN_HEAD_LENGTH);
         AlteringList {
             block_size,
             head_length,

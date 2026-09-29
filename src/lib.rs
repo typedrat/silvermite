@@ -35,7 +35,13 @@
 //! With the `petgraph` feature, the [`petgraph`](crate::petgraph) module
 //! builds problems from petgraph graphs.
 //!
+//! The crate is `no_std` and needs only `alloc`.
+//!
 //! [LEMON]: https://lemon.cs.elte.hu/
+
+#![no_std]
+
+extern crate alloc;
 
 mod circulation;
 mod cost_scaling;

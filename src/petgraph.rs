@@ -31,6 +31,8 @@
 //! assert_eq!(flows[&sa], 4);
 //! ```
 
+use alloc::vec;
+use alloc::vec::Vec;
 use nonmax::NonMaxU32;
 use petgraph::Directed;
 use petgraph::visit::{EdgeRef, GraphProp, IntoEdgeReferences, IntoNodeIdentifiers, NodeIndexable};

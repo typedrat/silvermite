@@ -1,6 +1,8 @@
-use std::fmt::Debug;
-use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFrom, RangeTo};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt::Debug;
+use core::marker::PhantomData;
+use core::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFrom, RangeTo};
 
 use nonmax::NonMaxU32;
 
@@ -123,7 +125,7 @@ impl<I> PartialEq for Link<I> {
 impl<I> Eq for Link<I> {}
 
 impl<I> Debug for Link<I> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         self.0.fmt(f)
     }
 }

@@ -38,8 +38,9 @@ Flow and cost types can be any signed primitive integers. An upper bound of
 `V::max_value()` means infinite capacity. Solver instances keep their buffers
 between calls to `solve`, so reuse one when solving many problems.
 
-The crate is plain safe Rust and works on 32-bit targets, including
-`wasm32-unknown-unknown`; the test suite passes on `wasm32-wasip1`.
+The crate is plain safe Rust, `no_std` (it needs only `alloc`), and works on
+32-bit targets, including `wasm32-unknown-unknown`; the test suite passes on
+`wasm32-wasip1`.
 
 ## petgraph
 

@@ -9,7 +9,8 @@
 //! flow change, and global updates, which relabel nodes in bulk by a
 //! bucket-based shortest path search towards deficit nodes.
 
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
 use itertools::izip;
 
@@ -565,7 +566,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                     }
                 }
             }
-            std::mem::swap(&mut process, &mut next);
+            core::mem::swap(&mut process, &mut next);
             next.clear();
             if process.is_empty() {
                 break;

@@ -31,6 +31,7 @@
 //! assert_eq!(flows[&sa], 4);
 //! ```
 
+use nonmax::NonMaxU32;
 use petgraph::Directed;
 use petgraph::visit::{EdgeRef, GraphProp, IntoEdgeReferences, IntoNodeIdentifiers, NodeIndexable};
 
@@ -102,20 +103,25 @@ where
     V: Number,
     C: Number,
 {
-    // Dense index of each graph index; u32::MAX marks holes.
-    let mut dense = vec![u32::MAX; graph.node_bound()];
+    // Dense index of each graph index; `None` marks holes.
+    let mut dense: Vec<Option<NonMaxU32>> = vec![None; graph.node_bound()];
     let mut nodes = Vec::new();
     let mut problem = Problem::new(0);
     for n in graph.node_identifiers() {
-        dense[graph.to_index(n)] = nodes.len() as u32;
+        dense[graph.to_index(n)] = NonMaxU32::new(nodes.len() as u32);
         nodes.push(n);
         problem.add_node(supply(n));
     }
+    let dense_index = |n| {
+        dense[graph.to_index(n)]
+            .expect("edge endpoints are graph nodes")
+            .get() as usize
+    };
 
     let mut edges = Vec::new();
     for e in graph.edge_references() {
-        let s = dense[graph.to_index(e.source())] as usize;
-        let t = dense[graph.to_index(e.target())] as usize;
+        let s = dense_index(e.source());
+        let t = dense_index(e.target());
         let id = e.id();
         let ArcData { lower, upper, cost } = arc(e);
         problem.add_arc(s, t, lower, upper, cost);

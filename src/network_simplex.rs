@@ -7,9 +7,12 @@
 //! always a feasible basis for the extended problem.
 
 use std::hint::cold_path;
+use std::iter;
 use std::ops::{ControlFlow, Range};
 
-use crate::ivec::{IVec, NONE};
+use itertools::izip;
+
+use crate::ivec::{IRef, IVec};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
 /// Strategy for choosing the entering arc in each simplex iteration.
@@ -35,16 +38,68 @@ pub enum PivotRule {
     AlteringList,
 }
 
-// Arc states. A non-tree arc's state is also the sign of the flow change
-// that would decrease its reduced cost, which lets the pivot rules compute
-// `state * reduced_cost` and look for negative values.
-const STATE_UPPER: i8 = -1;
-const STATE_TREE: i8 = 0;
-const STATE_LOWER: i8 = 1;
+/// Where an arc sits in the current basis.
+///
+/// A non-tree arc's discriminant is also the sign of the flow change that
+/// would decrease its reduced cost, which lets the pivot rules compute
+/// `state * reduced_cost` and look for negative values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i8)]
+enum ArcState {
+    /// Out of the tree, at its upper bound.
+    Upper = -1,
+    Tree = 0,
+    /// Out of the tree, at its lower bound.
+    Lower = 1,
+}
 
-// Direction of a tree arc relative to its child node.
-const DIR_DOWN: i8 = -1;
-const DIR_UP: i8 = 1;
+impl ArcState {
+    #[inline(always)]
+    fn sign<T: Number>(self) -> T {
+        T::from_i8(self as i8)
+    }
+
+    /// The state of a non-tree arc after it moves to its other bound.
+    fn flipped(self) -> Self {
+        match self {
+            ArcState::Upper => ArcState::Lower,
+            ArcState::Lower => ArcState::Upper,
+            ArcState::Tree => unreachable!("tree arcs have no bound to flip to"),
+        }
+    }
+}
+
+/// Orientation of a tree arc relative to its child node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i8)]
+enum Dir {
+    /// From the parent to the child.
+    Down = -1,
+    /// From the child to the parent.
+    Up = 1,
+}
+
+impl Dir {
+    #[inline(always)]
+    fn sign<T: Number>(self) -> T {
+        T::from_i8(self as i8)
+    }
+
+    fn reversed(self) -> Self {
+        match self {
+            Dir::Down => Dir::Up,
+            Dir::Up => Dir::Down,
+        }
+    }
+}
+
+/// Which side of the pivot cycle the leaving arc is on, relative to the
+/// direction flow is pushed around it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    First,
+    Second,
+}
 
 /// Network simplex solver for minimum cost flow.
 ///
@@ -95,14 +150,15 @@ pub struct NetworkSimplex<V, C> {
     pi: IVec<C>,
 
     // Spanning tree
+    // The root is its own parent.
     parent: IVec<u32>,
     pred: IVec<u32>,
     thread: IVec<u32>,
     rev_thread: IVec<u32>,
     succ_num: IVec<u32>,
     last_succ: IVec<u32>,
-    pred_dir: IVec<i8>,
-    state: IVec<i8>,
+    pred_dir: IVec<Dir>,
+    state: IVec<ArcState>,
     dirty_revs: Vec<u32>,
     root: u32,
 
@@ -193,9 +249,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         }
 
         self.load(problem);
-        if !self.init() {
-            return Err(Error::Infeasible);
-        }
+        self.init()?;
         match self.pivot_rule {
             PivotRule::FirstEligible => self.start::<FirstEligible>()?,
             PivotRule::BestEligible => self.start::<BestEligible>()?,
@@ -205,7 +259,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         }
 
         let flow: Vec<V> = self.arc_id.iter().map(|&i| self.flow[i]).collect();
-        let potential = (*self.pi)[..n].to_vec();
+        let potential = self.pi[..n].to_vec();
         let total_cost = problem.total_cost(&flow);
         Ok(Solution {
             flow,
@@ -234,227 +288,169 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
         self.parent.reset(all_node_num, 0);
         self.pred.reset(all_node_num, 0);
-        self.pred_dir.reset(all_node_num, 0);
+        self.pred_dir.reset(all_node_num, Dir::Up);
         self.thread.reset(all_node_num, 0);
         self.rev_thread.reset(all_node_num, 0);
         self.succ_num.reset(all_node_num, 0);
         self.last_succ.reset(all_node_num, 0);
-        self.state.reset(max_arc_num, 0);
+        self.state.reset(max_arc_num, ArcState::Tree);
 
         self.arc_id.clear();
-        self.arc_id.resize(m as usize, 0);
         if self.arc_mixing && n > 1 {
             // Deal arcs round-robin into `skip` interleaved runs.
             let skip = (m / n).max(3);
-            let (mut i, mut j) = (0u32, 0u32);
-            for a in 0..m as usize {
-                self.arc_id[a] = i;
-                i += skip;
-                if i >= m {
-                    j += 1;
-                    i = j;
-                }
-            }
+            self.arc_id
+                .extend((0..skip).flat_map(|j| (j..m).step_by(skip as usize)));
         } else {
-            for (a, id) in self.arc_id.iter_mut().enumerate() {
-                *id = a as u32;
-            }
+            self.arc_id.extend(0..m);
         }
 
-        for a in 0..m as usize {
-            let i = self.arc_id[a];
-            self.source[i] = p.source[a];
-            self.target[i] = p.target[a];
-            self.lower[i] = p.lower[a];
-            self.upper[i] = p.upper[a];
-            self.cost[i] = p.cost[a];
+        for (&i, &source, &target, &lower, &upper, &cost) in izip!(
+            &self.arc_id,
+            &p.source,
+            &p.target,
+            &p.lower,
+            &p.upper,
+            &p.cost
+        ) {
+            self.source[i] = source;
+            self.target[i] = target;
+            self.lower[i] = lower;
+            self.upper[i] = upper;
+            self.cost[i] = cost;
         }
         (*self.supply)[..n as usize].copy_from_slice(&p.supply);
         self.has_lower = p.lower.iter().any(|&l| l != V::zero());
         self.stype = p.supply_type;
     }
 
-    fn init(&mut self) -> bool {
+    fn init(&mut self) -> Result<(), Error> {
         let n = self.node_num;
         let m = self.arc_num;
+        let (nodes, arcs) = (..n as usize, ..m as usize);
         let inf = V::max_value();
         let max = V::max_value();
 
-        self.sum_supply = V::zero();
-        for i in 0..n {
-            self.sum_supply += self.supply[i];
-        }
+        self.sum_supply = self.supply[nodes].iter().fold(V::zero(), |sum, &s| sum + s);
         let feasible_type = match self.stype {
             SupplyType::Geq => self.sum_supply <= V::zero(),
             SupplyType::Leq => self.sum_supply >= V::zero(),
         };
         if !feasible_type {
-            return false;
+            return Err(Error::Infeasible);
         }
 
         // Remove non-zero lower bounds
         if self.has_lower {
-            for i in 0..m {
-                let c = self.lower[i];
-                let upper = self.upper[i];
-                self.cap[i] = if c >= V::zero() {
+            for (cap, &c, &upper, &source, &target) in izip!(
+                &mut self.cap[arcs],
+                &self.lower[arcs],
+                &self.upper[arcs],
+                &self.source[arcs],
+                &self.target[arcs],
+            ) {
+                *cap = if c >= V::zero() {
                     if upper < max { upper - c } else { inf }
                 } else if upper < max + c {
                     upper - c
                 } else {
                     inf
                 };
-                self.supply[self.source[i]] -= c;
-                self.supply[self.target[i]] += c;
+                self.supply[source] -= c;
+                self.supply[target] += c;
             }
         } else {
-            for i in 0..m {
-                self.cap[i] = self.upper[i];
-            }
+            self.cap[arcs].copy_from_slice(&self.upper[arcs]);
         }
 
         // Large enough that no optimal basis uses an artificial arc with
         // flow unless the problem is infeasible.
         let art_cost = C::max_value() / C::from_i8(2) + C::one();
 
-        for i in 0..m {
-            self.flow[i] = V::zero();
-            self.state[i] = STATE_LOWER;
-        }
+        self.flow[arcs].fill(V::zero());
+        self.state[arcs].fill(ArcState::Lower);
 
-        // Set data for the artificial root node
+        // Start from the tree where every node hangs directly off the
+        // artificial root, in thread order 0, 1, ..., n - 1. The root has no
+        // pred arc, so its pred entry is never read.
         let root = n;
         self.root = root;
-        self.parent[root] = NONE;
-        self.pred[root] = NONE;
-        self.thread[root] = 0;
-        self.rev_thread[0] = root;
+        self.parent.fill(root);
+        self.succ_num.fill(1);
         self.succ_num[root] = n + 1;
-        self.last_succ[root] = root - 1;
+        for (thread, u) in self.thread.iter_mut().zip((1..=n).chain([0])) {
+            *thread = u;
+        }
+        for (rev_thread, u) in self
+            .rev_thread
+            .iter_mut()
+            .zip([root].into_iter().chain(0..n))
+        {
+            *rev_thread = u;
+        }
+        for (last_succ, u) in self.last_succ.iter_mut().zip((0..n).chain([root - 1])) {
+            *last_succ = u;
+        }
         self.supply[root] = -self.sum_supply;
         self.pi[root] = C::zero();
 
-        // Add artificial arcs and initialize the spanning tree
-        if self.sum_supply == V::zero() {
-            // EQ supply constraints
-            self.search_arc_num = m;
-            self.all_arc_num = m + n;
-            for u in 0..n {
-                let e = m + u;
-                self.parent[u] = root;
-                self.pred[u] = e;
-                self.thread[u] = u + 1;
-                self.rev_thread[u + 1] = u;
-                self.succ_num[u] = 1;
-                self.last_succ[u] = u;
-                self.cap[e] = inf;
-                self.state[e] = STATE_TREE;
-                if self.supply[u] >= V::zero() {
-                    self.pred_dir[u] = DIR_UP;
-                    self.pi[u] = C::zero();
-                    self.source[e] = u;
-                    self.target[e] = root;
-                    self.flow[e] = self.supply[u];
-                    self.cost[e] = C::zero();
-                } else {
-                    self.pred_dir[u] = DIR_DOWN;
-                    self.pi[u] = art_cost;
-                    self.source[e] = root;
-                    self.target[e] = u;
-                    self.flow[e] = -self.supply[u];
-                    self.cost[e] = art_cost;
-                }
-            }
-        } else if self.sum_supply > V::zero() {
-            // LEQ supply constraints
-            self.search_arc_num = m + n;
-            let mut f = m + n;
-            for u in 0..n {
-                let e = m + u;
-                self.parent[u] = root;
-                self.thread[u] = u + 1;
-                self.rev_thread[u + 1] = u;
-                self.succ_num[u] = 1;
-                self.last_succ[u] = u;
-                if self.supply[u] >= V::zero() {
-                    self.pred_dir[u] = DIR_UP;
-                    self.pi[u] = C::zero();
-                    self.pred[u] = e;
-                    self.source[e] = u;
-                    self.target[e] = root;
-                    self.cap[e] = inf;
-                    self.flow[e] = self.supply[u];
-                    self.cost[e] = C::zero();
-                    self.state[e] = STATE_TREE;
-                } else {
-                    self.pred_dir[u] = DIR_DOWN;
-                    self.pi[u] = art_cost;
-                    self.pred[u] = f;
-                    self.source[f] = root;
-                    self.target[f] = u;
-                    self.cap[f] = inf;
-                    self.flow[f] = -self.supply[u];
-                    self.cost[f] = art_cost;
-                    self.state[f] = STATE_TREE;
-                    self.source[e] = u;
-                    self.target[e] = root;
-                    self.cap[e] = inf;
-                    self.flow[e] = V::zero();
-                    self.cost[e] = C::zero();
-                    self.state[e] = STATE_LOWER;
-                    f += 1;
-                }
-            }
-            self.all_arc_num = f;
+        // Join each node to the root by an artificial tree arc carrying its
+        // supply: upwards for supply, downwards for demand. Tree arcs in the
+        // direction the supply constraints do not allow slack in cost
+        // `art_cost`, so the optimum drains them. With GEQ/LEQ constraints,
+        // each costly tree arc gets a free non-tree twin in the other
+        // direction, which the pivots search to absorb the slack.
+        let has_slack = self.sum_supply != V::zero();
+        let costly = if self.sum_supply < V::zero() {
+            Dir::Up
         } else {
-            // GEQ supply constraints
-            self.search_arc_num = m + n;
-            let mut f = m + n;
-            for u in 0..n {
-                let e = m + u;
-                self.parent[u] = root;
-                self.thread[u] = u + 1;
-                self.rev_thread[u + 1] = u;
-                self.succ_num[u] = 1;
-                self.last_succ[u] = u;
-                if self.supply[u] <= V::zero() {
-                    self.pred_dir[u] = DIR_DOWN;
-                    self.pi[u] = C::zero();
-                    self.pred[u] = e;
-                    self.source[e] = root;
-                    self.target[e] = u;
-                    self.cap[e] = inf;
-                    self.flow[e] = -self.supply[u];
-                    self.cost[e] = C::zero();
-                    self.state[e] = STATE_TREE;
-                } else {
-                    self.pred_dir[u] = DIR_UP;
-                    self.pi[u] = -art_cost;
-                    self.pred[u] = f;
-                    self.source[f] = u;
-                    self.target[f] = root;
-                    self.cap[f] = inf;
-                    self.flow[f] = self.supply[u];
-                    self.state[f] = STATE_TREE;
-                    self.cost[f] = art_cost;
-                    self.source[e] = root;
-                    self.target[e] = u;
-                    self.cap[e] = inf;
-                    self.flow[e] = V::zero();
-                    self.cost[e] = C::zero();
-                    self.state[e] = STATE_LOWER;
-                    f += 1;
-                }
+            Dir::Down
+        };
+        self.search_arc_num = if has_slack { m + n } else { m };
+        let mut next_extra = m + n;
+        for u in 0..n {
+            let supply = self.supply[u];
+            let dir = if supply > V::zero() || (supply == V::zero() && costly == Dir::Down) {
+                Dir::Up
+            } else {
+                Dir::Down
+            };
+            let cost = if dir == costly { art_cost } else { C::zero() };
+            let mut e = m + u;
+            if has_slack && dir == costly {
+                self.set_artificial(e, u, dir.reversed(), V::zero(), C::zero(), ArcState::Lower);
+                e = next_extra;
+                next_extra += 1;
             }
-            self.all_arc_num = f;
+            let flow = dir.sign::<V>() * supply;
+            self.set_artificial(e, u, dir, flow, cost, ArcState::Tree);
+            self.pred[u] = e;
+            self.pred_dir[u] = dir;
+            self.pi[u] = -dir.sign::<C>() * cost;
         }
+        self.all_arc_num = if has_slack { next_extra } else { m + n };
 
-        true
+        Ok(())
+    }
+
+    /// Sets up the infinite-capacity artificial arc `e` between node `u` and
+    /// the root, oriented `dir` relative to `u`.
+    fn set_artificial(&mut self, e: u32, u: u32, dir: Dir, flow: V, cost: C, state: ArcState) {
+        let (source, target) = match dir {
+            Dir::Up => (u, self.root),
+            Dir::Down => (self.root, u),
+        };
+        self.source[e] = source;
+        self.target[e] = target;
+        self.cap[e] = V::max_value();
+        self.flow[e] = flow;
+        self.cost[e] = cost;
+        self.state[e] = state;
     }
 
     #[inline(always)]
     fn reduced_cost(&self, e: u32) -> C {
-        C::from_i8(self.state[e])
+        self.state[e].sign::<C>()
             * (self.cost[e] + self.pi[self.source[e]] - self.pi[self.target[e]])
     }
 
@@ -465,6 +461,8 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let parent = self.parent.as_ref();
         let mut u = source[self.in_arc];
         let mut v = target[self.in_arc];
+        // The root's subtree is the largest, so only a non-root node ever
+        // steps up.
         while u != v {
             if succ_num[u] < succ_num[v] {
                 u = parent[u];
@@ -494,59 +492,56 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let join = self.join;
 
         // Orient the cycle along the direction flow will be pushed.
-        let (first, second) = if state[in_arc] == STATE_LOWER {
+        let (first, second) = if state[in_arc] == ArcState::Lower {
             (source[in_arc], target[in_arc])
         } else {
             (target[in_arc], source[in_arc])
         };
         let mut delta = cap[in_arc];
         let mut u_out = self.u_out;
-        let mut result = 0;
+        let mut leaving = None;
 
-        let mut u = first;
-        while u != join {
+        // How far flow can be pushed along the pred arc of `u` when the
+        // cycle runs through it in direction `along`.
+        let residual = |u: u32, along: Dir| {
             let e = pred[u];
-            let mut d = flow[e];
-            if pred_dir[u] == DIR_DOWN {
+            let d = flow[e];
+            if pred_dir[u] == along {
+                d
+            } else {
                 let c = cap[e];
-                d = if c >= max { inf } else { c - d };
+                if c >= max { inf } else { c - d }
             }
+        };
+
+        for u in path_up(parent, first, join) {
+            let d = residual(u, Dir::Up);
             if d < delta {
                 delta = d;
                 u_out = u;
-                result = 1;
+                leaving = Some(Side::First);
             }
-            u = parent[u];
         }
 
         // `<=` here and `<` above pick the last blocking arc along the cycle
         // direction, which keeps the tree strongly feasible.
-        let mut u = second;
-        while u != join {
-            let e = pred[u];
-            let mut d = flow[e];
-            if pred_dir[u] == DIR_UP {
-                let c = cap[e];
-                d = if c >= max { inf } else { c - d };
-            }
+        for u in path_up(parent, second, join) {
+            let d = residual(u, Dir::Down);
             if d <= delta {
                 delta = d;
                 u_out = u;
-                result = 2;
+                leaving = Some(Side::Second);
             }
-            u = parent[u];
         }
         self.delta = delta;
         self.u_out = u_out;
 
-        if result == 1 {
-            self.u_in = first;
-            self.v_in = second;
+        (self.u_in, self.v_in) = if leaving == Some(Side::First) {
+            (first, second)
         } else {
-            self.u_in = second;
-            self.v_in = first;
-        }
-        result != 0
+            (second, first)
+        };
+        leaving.is_some()
     }
 
     fn change_flow(&mut self, change: bool) {
@@ -560,29 +555,25 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let in_arc = self.in_arc;
         let join = self.join;
         if self.delta > V::zero() {
-            let val = V::from_i8(state[in_arc]) * self.delta;
+            let val = state[in_arc].sign::<V>() * self.delta;
             flow[in_arc] += val;
-            let mut u = source[in_arc];
-            while u != join {
-                flow[pred[u]] -= V::from_i8(pred_dir[u]) * val;
-                u = parent[u];
+            for u in path_up(parent, source[in_arc], join) {
+                flow[pred[u]] -= pred_dir[u].sign::<V>() * val;
             }
-            let mut u = target[in_arc];
-            while u != join {
-                flow[pred[u]] += V::from_i8(pred_dir[u]) * val;
-                u = parent[u];
+            for u in path_up(parent, target[in_arc], join) {
+                flow[pred[u]] += pred_dir[u].sign::<V>() * val;
             }
         }
         if change {
-            state[in_arc] = STATE_TREE;
+            state[in_arc] = ArcState::Tree;
             let out_arc = pred[self.u_out];
             state[out_arc] = if flow[out_arc] == V::zero() {
-                STATE_LOWER
+                ArcState::Lower
             } else {
-                STATE_UPPER
+                ArcState::Upper
             };
         } else {
-            state[in_arc] = -state[in_arc];
+            state[in_arc] = state[in_arc].flipped();
         }
     }
 
@@ -607,16 +598,17 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let old_last_succ = last_succ[u_out];
         let v_out = parent[u_out];
         self.v_out = v_out;
+        let in_dir = if u_in == source[in_arc] {
+            Dir::Up
+        } else {
+            Dir::Down
+        };
 
         if u_in == u_out {
             // Update parent, pred, pred_dir
             parent[u_in] = v_in;
             pred[u_in] = in_arc;
-            pred_dir[u_in] = if u_in == source[in_arc] {
-                DIR_UP
-            } else {
-                DIR_DOWN
-            };
+            pred_dir[u_in] = in_dir;
 
             // Update thread and rev_thread
             if thread[v_in] != u_out {
@@ -693,60 +685,52 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             let mut tmp_sc = 0u32;
             let tmp_ls = last_succ[u_out];
             let mut u = u_out;
-            let mut p = parent[u];
             while u != u_in {
+                let p = parent[u];
                 pred[u] = pred[p];
-                pred_dir[u] = -pred_dir[p];
+                pred_dir[u] = pred_dir[p].reversed();
                 tmp_sc += succ_num[u] - succ_num[p];
                 succ_num[u] = tmp_sc;
                 last_succ[p] = tmp_ls;
                 u = p;
-                p = parent[u];
             }
             pred[u_in] = in_arc;
-            pred_dir[u_in] = if u_in == source[in_arc] {
-                DIR_UP
-            } else {
-                DIR_DOWN
-            };
+            pred_dir[u_in] = in_dir;
             succ_num[u_in] = old_succ_num;
         }
+        let parent = parent.as_ref();
 
         // Update last_succ from v_in towards the root
-        let up_limit_out = if last_succ[join] == v_in { join } else { NONE };
+        let up_limit_out = (last_succ[join] == v_in).then_some(join);
         let last_succ_out = last_succ[u_out];
-        let mut u = v_in;
-        while u != NONE && last_succ[u] == v_in {
+        for u in ancestors(parent, v_in) {
+            if last_succ[u] != v_in {
+                break;
+            }
             last_succ[u] = last_succ_out;
-            u = parent[u];
         }
 
         // Update last_succ from v_out towards the root
-        if join != old_rev_thread && v_in != old_rev_thread {
-            let mut u = v_out;
-            while u != up_limit_out && last_succ[u] == old_last_succ {
-                last_succ[u] = old_rev_thread;
-                u = parent[u];
-            }
-        } else if last_succ_out != old_last_succ {
-            let mut u = v_out;
-            while u != up_limit_out && last_succ[u] == old_last_succ {
-                last_succ[u] = last_succ_out;
-                u = parent[u];
+        let new_last_succ = if join != old_rev_thread && v_in != old_rev_thread {
+            Some(old_rev_thread)
+        } else {
+            (last_succ_out != old_last_succ).then_some(last_succ_out)
+        };
+        if let Some(new_last_succ) = new_last_succ {
+            for u in ancestors(parent, v_out).take_while(|&u| Some(u) != up_limit_out) {
+                if last_succ[u] != old_last_succ {
+                    break;
+                }
+                last_succ[u] = new_last_succ;
             }
         }
 
-        // Update succ_num from v_in to join
-        let mut u = v_in;
-        while u != join {
+        // Update succ_num from v_in and from v_out to join
+        for u in path_up(parent, v_in, join) {
             succ_num[u] += old_succ_num;
-            u = parent[u];
         }
-        // Update succ_num from v_out to join
-        let mut u = v_out;
-        while u != join {
+        for u in path_up(parent, v_out, join) {
             succ_num[u] -= old_succ_num;
-            u = parent[u];
         }
     }
 
@@ -759,7 +743,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let last_succ = self.last_succ.as_ref();
         let mut pi = self.pi.as_mut();
         let u_in = self.u_in;
-        let sigma = pi[self.v_in] - pi[u_in] - C::from_i8(pred_dir[u_in]) * cost[self.in_arc];
+        let sigma = pi[self.v_in] - pi[u_in] - pred_dir[u_in].sign::<C>() * cost[self.in_arc];
         let end = thread[last_succ[u_in]];
         let mut u = u_in;
         while u != end {
@@ -768,69 +752,73 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         }
     }
 
-    /// Performs one pivot on `self.in_arc`. Returns false if the cycle has
-    /// infinite capacity, i.e. the problem is unbounded.
+    /// Performs one pivot on `self.in_arc`. Fails if the cycle has infinite
+    /// capacity, i.e. the problem is unbounded.
     #[inline]
-    fn pivot(&mut self) -> bool {
+    fn pivot(&mut self) -> Result<(), Error> {
         self.find_join_node();
         let change = self.find_leaving_arc();
         if self.delta >= V::max_value() {
-            return false;
+            return Err(Error::Unbounded);
         }
         self.change_flow(change);
         if change {
             self.update_tree_structure();
             self.update_potential();
         }
-        true
+        Ok(())
     }
 
     /// Heuristic warm start: pivots in arcs likely to carry flow in the
-    /// optimum. Returns false if the problem turns out to be unbounded.
-    fn initial_pivots(&mut self) -> bool {
-        let n = self.node_num;
-        let m = self.arc_num;
+    /// optimum. Fails if the problem turns out to be unbounded.
+    fn initial_pivots(&mut self) -> Result<(), Error> {
+        let n = self.node_num as usize;
+        let m = self.arc_num as usize;
 
-        let mut total = V::zero();
-        let mut supply_nodes = Vec::new();
-        let mut demand_nodes = Vec::new();
-        for u in 0..n {
-            let curr = self.supply[u];
-            if curr > V::zero() {
-                total += curr;
-                supply_nodes.push(u);
-            } else if curr < V::zero() {
-                demand_nodes.push(u);
-            }
-        }
+        let supplies = &self.supply[..n];
+        let nodes_where = |keep: fn(V) -> bool| -> Vec<u32> {
+            (0..n as u32)
+                .zip(supplies)
+                .filter(|&(_, &s)| keep(s))
+                .map(|(u, _)| u)
+                .collect()
+        };
+        let supply_nodes = nodes_where(|s| s > V::zero());
+        let demand_nodes = nodes_where(|s| s < V::zero());
+        let mut total = supply_nodes
+            .iter()
+            .fold(V::zero(), |sum, &u| sum + self.supply[u]);
         if self.sum_supply > V::zero() {
             total -= self.sum_supply;
         }
         if total <= V::zero() {
-            return true;
+            return Ok(());
         }
 
+        let targets = &self.target[..m];
         let mut arc_vector: Vec<u32> = Vec::new();
         if self.sum_supply >= V::zero() {
             if supply_nodes.len() == 1 && demand_nodes.len() == 1 {
                 // Reverse DFS from the sink to the source over arcs that can
                 // carry the whole amount.
-                let mut in_first = vec![0u32; n as usize + 1];
-                for j in 0..m {
-                    in_first[self.target[j] as usize + 1] += 1;
+                let mut in_first = vec![0u32; n + 1];
+                for &t in targets {
+                    in_first[t as usize + 1] += 1;
                 }
-                for v in 0..n as usize {
-                    in_first[v + 1] += in_first[v];
+                let mut sum = 0;
+                for count in &mut in_first {
+                    sum += *count;
+                    *count = sum;
                 }
                 let mut fill = in_first.clone();
-                let mut in_arcs = vec![0u32; m as usize];
-                for j in 0..m {
-                    let t = self.target[j] as usize;
-                    in_arcs[fill[t] as usize] = j;
-                    fill[t] += 1;
+                let mut in_arcs = vec![0u32; m];
+                for (j, &t) in (0..).zip(targets) {
+                    let slot = &mut fill[t as usize];
+                    in_arcs[*slot as usize] = j;
+                    *slot += 1;
                 }
 
-                let mut reached = vec![false; n as usize];
+                let mut reached = vec![false; n];
                 let s = supply_nodes[0];
                 let t = demand_nodes[0];
                 let mut stack = vec![t];
@@ -854,49 +842,41 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 }
             } else {
                 // Find the min. cost incoming arc for each demand node
-                let best = self.cheapest_arcs(|ns, j| ns.target[j]);
+                let best = self.cheapest_arcs(targets);
                 arc_vector.extend(demand_nodes.iter().filter_map(|&v| best[v as usize]));
             }
         } else {
             // Find the min. cost outgoing arc for each supply node
-            let best = self.cheapest_arcs(|ns, j| ns.source[j]);
+            let best = self.cheapest_arcs(&self.source[..m]);
             arc_vector.extend(supply_nodes.iter().filter_map(|&u| best[u as usize]));
         }
 
         for in_arc in arc_vector {
             self.in_arc = in_arc;
-            if self.reduced_cost(in_arc) >= C::zero() {
-                continue;
-            }
-            if !self.pivot() {
-                return false;
+            if self.reduced_cost(in_arc) < C::zero() {
+                self.pivot()?;
             }
         }
-        true
+        Ok(())
     }
 
     /// For each node, the cheapest original arc with that node as its
-    /// `endpoint`.
-    fn cheapest_arcs(&self, endpoint: impl Fn(&Self, u32) -> u32) -> Vec<Option<u32>> {
-        let mut best: Vec<Option<u32>> = vec![None; self.node_num as usize];
-        let mut best_cost = vec![C::max_value(); self.node_num as usize];
-        for j in 0..self.arc_num {
-            let v = endpoint(self, j) as usize;
-            let c = self.cost[j];
-            if c < best_cost[v] {
-                best_cost[v] = c;
-                best[v] = Some(j);
+    /// endpoint in `endpoints`.
+    fn cheapest_arcs(&self, endpoints: &[u32]) -> Vec<Option<u32>> {
+        let mut best: Vec<Option<(u32, C)>> = vec![None; self.node_num as usize];
+        for (j, &v, &c) in izip!(0.., endpoints, &*self.cost) {
+            let best = &mut best[v as usize];
+            if best.is_none_or(|(_, best_cost)| c < best_cost) {
+                *best = Some((j, c));
             }
         }
-        best
+        best.into_iter().map(|b| b.map(|(j, _)| j)).collect()
     }
 
     fn start<P: Pivot<C>>(&mut self) -> Result<(), Error> {
         let mut pivot = P::new(self.search_arc_num as usize);
 
-        if !self.initial_pivots() {
-            return Err(Error::Unbounded);
-        }
+        self.initial_pivots()?;
 
         loop {
             let view = PivotView {
@@ -911,34 +891,36 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 break;
             };
             self.in_arc = in_arc as u32;
-            if !self.pivot() {
-                return Err(Error::Unbounded);
-            }
+            self.pivot()?;
         }
 
         // Flow left on an artificial arc outside the search range means some
         // supply could not be routed.
-        for e in self.search_arc_num..self.all_arc_num {
-            if self.flow[e] != V::zero() {
-                return Err(Error::Infeasible);
-            }
+        let unsearched = self.search_arc_num as usize..self.all_arc_num as usize;
+        if self.flow[unsearched].iter().any(|&f| f != V::zero()) {
+            return Err(Error::Infeasible);
         }
 
         // Transform the solution and the supply map to the original form
         if self.has_lower {
-            for i in 0..self.arc_num {
-                let c = self.lower[i];
+            let arcs = ..self.arc_num as usize;
+            for (flow, &c, &source, &target) in izip!(
+                &mut self.flow[arcs],
+                &self.lower[arcs],
+                &self.source[arcs],
+                &self.target[arcs],
+            ) {
                 if c != V::zero() {
-                    self.flow[i] += c;
-                    self.supply[self.source[i]] += c;
-                    self.supply[self.target[i]] -= c;
+                    *flow += c;
+                    self.supply[source] += c;
+                    self.supply[target] -= c;
                 }
             }
         }
 
         // Shift potentials to meet the sign requirements of the GEQ/LEQ
         // optimality conditions
-        let pi = &mut (*self.pi)[..self.node_num as usize];
+        let pi = &mut self.pi[..self.node_num as usize];
         if self.sum_supply == V::zero() {
             match self.stype {
                 SupplyType::Geq => {
@@ -960,12 +942,32 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     }
 }
 
+/// The nodes from `from` up to, but not including, its ancestor `to`.
+#[inline(always)]
+fn path_up(parent: IRef<'_, u32>, from: u32, to: u32) -> impl Iterator<Item = u32> + '_ {
+    let mut u = from;
+    iter::from_fn(move || {
+        if u == to {
+            return None;
+        }
+        let here = u;
+        u = parent[u];
+        Some(here)
+    })
+}
+
+/// The nodes from `from` up to and including the root.
+#[inline(always)]
+fn ancestors(parent: IRef<'_, u32>, from: u32) -> impl Iterator<Item = u32> + '_ {
+    iter::successors(Some(from), move |&u| Some(parent[u]).filter(|&p| p != u))
+}
+
 /// The parts of the solver state a pivot rule reads.
 struct PivotView<'a, C> {
     source: &'a [u32],
     target: &'a [u32],
     cost: &'a [C],
-    state: &'a [i8],
+    state: &'a [ArcState],
     pi: &'a [C],
     search_arc_num: usize,
 }
@@ -975,7 +977,7 @@ impl<C: Number> PivotView<'_, C> {
     /// enter the basis.
     #[inline(always)]
     fn eligibility(&self, e: usize) -> C {
-        C::from_i8(self.state[e])
+        self.state[e].sign::<C>()
             * (self.cost[e] + self.pi[self.source[e] as usize] - self.pi[self.target[e] as usize])
     }
 
@@ -1000,7 +1002,7 @@ impl<C: Number> PivotView<'_, C> {
             .zip(&self.target[range.clone()]);
         for (i, (((&state, &cost), &source), &target)) in arcs.enumerate() {
             let c =
-                C::from_i8(state) * (cost + self.pi[source as usize] - self.pi[target as usize]);
+                state.sign::<C>() * (cost + self.pi[source as usize] - self.pi[target as usize]);
             f(range.start + i, c)?;
         }
         ControlFlow::Continue(())
@@ -1282,12 +1284,10 @@ impl<C: Number> Pivot<C> for AlteringList<C> {
             self.candidates
                 .select_nth_unstable_by_key(new_length - 1, |&e| cand_cost[e]);
         }
-        (*self.candidates)[..new_length].sort_unstable_by_key(|&e| cand_cost[e]);
+        self.candidates[..new_length].sort_unstable_by_key(|&e| cand_cost[e]);
 
         // Take the best as the entering arc and keep the rest of the head
-        let in_arc = self.candidates[0];
-        self.candidates[0] = self.candidates[new_length - 1];
-        self.candidates.truncate(new_length - 1);
-        Some(in_arc)
+        self.candidates.truncate(new_length);
+        Some(self.candidates.swap_remove(0))
     }
 }

@@ -5,7 +5,7 @@
 //! arc block lists its outgoing arcs (forward), then its incoming arcs
 //! (backward), then one arc to the artificial root.
 
-use crate::Number;
+use crate::{Error, Number};
 
 /// The residual graph layout the circulation reads, restricted to the real
 /// nodes `0..node_num`.
@@ -22,14 +22,14 @@ pub(crate) struct Layout<'a> {
 ///
 /// `cap` and `flow` are indexed by forward residual arc; `arcs` lists every
 /// forward arc once, in the order the greedy initialization visits them.
-/// Returns false if no such flow exists.
+/// Fails with [`Error::Infeasible`] if no such flow exists.
 pub(crate) fn circulation<V: Number>(
     g: &Layout<'_>,
     arcs: &[u32],
     cap: &[V],
     supply: &[V],
     flow: &mut [V],
-) -> bool {
+) -> Result<(), Error> {
     let n = g.node_num;
     let mut excess: Vec<V> = supply[..n].to_vec();
 
@@ -57,9 +57,9 @@ pub(crate) fn circulation<V: Number>(
     }
 
     let mut level = Elevator::new(n);
-    for (v, &ex) in excess.iter().enumerate() {
+    for (v, &ex) in (0..).zip(&excess) {
         if ex > V::zero() {
-            level.activate(v as u32);
+            level.activate(v);
         }
     }
 
@@ -143,82 +143,70 @@ pub(crate) fn circulation<V: Number>(
             level.deactivate(act);
         } else if mlevel == n as u32 {
             // No admissible arc can ever appear: `act` is behind a barrier.
-            return false;
+            return Err(Error::Infeasible);
         } else {
             level.lift_highest_active(mlevel + 1);
             if level.on_level(actlevel) == 0 {
                 // Emptying a level cuts every node above it off from the
                 // deficits below, which also proves infeasibility.
-                return false;
+                return Err(Error::Infeasible);
             }
         }
     }
-    true
+    Ok(())
 }
 
 /// Bucketed node levels for push-relabel.
 ///
 /// All items live in one array partitioned into contiguous per-level
-/// segments; within a segment the active items come first. Positions are
-/// signed because an empty active prefix is marked by
-/// `last_active[l] == first[l] - 1`.
+/// segments `first[l]..first[l + 1]`; within a segment the active items come
+/// first, at `first[l]..active_end[l]`.
 struct Elevator {
     max_level: u32,
     items: Vec<u32>,
-    where_: Vec<isize>,
+    where_: Vec<usize>,
     level: Vec<u32>,
-    first: Vec<isize>,
-    last_active: Vec<isize>,
-    highest_active: isize,
+    first: Vec<usize>,
+    active_end: Vec<usize>,
+    highest_active: Option<u32>,
 }
 
 impl Elevator {
     /// Creates an elevator over items `0..item_num`, all on level 0 and
     /// inactive, with levels `0..=item_num`.
     fn new(item_num: usize) -> Self {
-        let max_level = item_num as u32;
-        let mut first = vec![0isize; item_num + 2];
-        let mut last_active = vec![-1isize; item_num + 2];
         // Everything is on level 0, so every higher level starts at the end.
-        for l in 1..=item_num + 1 {
-            first[l] = item_num as isize;
-            last_active[l] = item_num as isize - 1;
-        }
+        let mut first = vec![item_num; item_num + 2];
+        first[0] = 0;
         Elevator {
-            max_level,
+            max_level: item_num as u32,
             items: (0..item_num as u32).collect(),
-            where_: (0..item_num as isize).collect(),
+            where_: (0..item_num).collect(),
             level: vec![0; item_num],
+            active_end: first.clone(),
             first,
-            last_active,
-            highest_active: -1,
+            highest_active: None,
         }
     }
 
     #[inline]
-    fn swap(&mut self, i: isize, j: isize) {
-        let (i, j) = (i as usize, j as usize);
-        let ti = self.items[i];
-        let tj = self.items[j];
-        self.items[i] = tj;
-        self.items[j] = ti;
-        self.where_[ti as usize] = j as isize;
-        self.where_[tj as usize] = i as isize;
+    fn swap(&mut self, i: usize, j: usize) {
+        self.items.swap(i, j);
+        self.where_[self.items[i] as usize] = i;
+        self.where_[self.items[j] as usize] = j;
     }
 
     /// Moves the item at position `s` to position `p`.
     #[inline]
-    fn copy_pos(&mut self, s: isize, p: isize) {
+    fn copy_pos(&mut self, s: usize, p: usize) {
         if s != p {
-            let item = self.items[s as usize];
-            self.items[p as usize] = item;
-            self.where_[item as usize] = p;
+            self.copy_item(self.items[s], p);
         }
     }
 
     #[inline]
-    fn copy_item(&mut self, item: u32, p: isize) {
-        self.items[p as usize] = item;
+    fn copy_item(&mut self, item: u32, p: usize) {
+        self.items[p] = item;
         self.where_[item as usize] = p;
     }
 
@@ -227,63 +215,66 @@ impl Elevator {
     }
 
     fn active(&self, i: u32) -> bool {
-        self.where_[i as usize] <= self.last_active[self.level[i as usize] as usize]
+        self.where_[i as usize] < self.active_end[self.level(i) as usize]
     }
 
     fn activate(&mut self, i: u32) {
-        let l = self.level[i as usize] as usize;
-        self.last_active[l] += 1;
-        self.swap(self.where_[i as usize], self.last_active[l]);
-        if l as isize > self.highest_active {
-            self.highest_active = l as isize;
+        let l = self.level(i);
+        let end = self.active_end[l as usize];
+        self.swap(self.where_[i as usize], end);
+        self.active_end[l as usize] += 1;
+        if self.highest_active.is_none_or(|h| l > h) {
+            self.highest_active = Some(l);
         }
     }
 
     fn deactivate(&mut self, i: u32) {
-        let l = self.level[i as usize] as usize;
-        self.swap(self.where_[i as usize], self.last_active[l]);
-        self.last_active[l] -= 1;
+        let l = self.level(i) as usize;
+        self.active_end[l] -= 1;
+        self.swap(self.where_[i as usize], self.active_end[l]);
         self.drop_empty_highest();
     }
 
     fn drop_empty_highest(&mut self) {
-        while self.highest_active >= 0 {
-            let h = self.highest_active as usize;
-            if self.last_active[h] >= self.first[h] {
+        while let Some(h) = self.highest_active {
+            if self.active_end[h as usize] > self.first[h as usize] {
                 break;
             }
-            self.highest_active -= 1;
+            self.highest_active = h.checked_sub(1);
         }
     }
 
-    fn on_level(&self, l: u32) -> isize {
+    fn on_level(&self, l: u32) -> usize {
         let l = l as usize;
         self.first[l + 1] - self.first[l]
     }
 
     fn highest_active(&self) -> Option<u32> {
-        (self.highest_active >= 0)
-            .then(|| self.items[self.last_active[self.highest_active as usize] as usize])
+        self.highest_active
+            .map(|h| self.items[self.active_end[h as usize] - 1])
     }
 
     /// Lifts the highest active item to `new_level`, shifting the level
     /// boundaries in between down by one slot.
     fn lift_highest_active(&mut self, new_level: u32) {
-        let ha = self.highest_active as usize;
-        let li = self.items[self.last_active[ha] as usize];
+        let ha = self.highest_active.expect("an item is active") as usize;
+        let new_level_u = new_level as usize;
+        self.active_end[ha] -= 1;
+        let la = self.active_end[ha];
+        let li = self.items[la];
 
         self.first[ha + 1] -= 1;
-        let la = self.last_active[ha];
-        self.last_active[ha] -= 1;
         self.copy_pos(self.first[ha + 1], la);
-        for l in ha + 1..new_level as usize {
+        // The levels in between have no active items, so their active
+        // prefixes stay empty as their segments shift down.
+        for l in ha + 1..new_level_u {
             self.first[l + 1] -= 1;
             self.copy_pos(self.first[l + 1], self.first[l]);
-            self.last_active[l] -= 1;
+            self.active_end[l] -= 1;
         }
-        self.copy_item(li, self.first[new_level as usize]);
+        self.copy_item(li, self.first[new_level_u]);
         self.level[li as usize] = new_level;
-        self.highest_active = new_level as isize;
+        self.highest_active = Some(new_level);
         debug_assert!(new_level <= self.max_level);
     }
 }

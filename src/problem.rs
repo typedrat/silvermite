@@ -152,12 +152,18 @@ impl<V: Number, C: Number> Problem<V, C> {
     pub(crate) fn validate(&self, extra_arcs_per_node: usize) -> Result<(), Error> {
         let n = self.node_count();
         let m = self.arc_count();
-        // Internal indices are u32, with u32::MAX reserved as a sentinel.
+        // Internal indices are u32, with u32::MAX reserved as the niche for
+        // optional indices.
         let internal_arcs = (m as u128) * 2 + (n as u128) * extra_arcs_per_node as u128;
         if n as u128 + 2 >= u32::MAX as u128 || internal_arcs >= u32::MAX as u128 {
             return Err(Error::TooLarge);
         }
-        if let Some(arc) = (0..m).find(|&a| self.upper[a] < self.lower[a]) {
+        if let Some(arc) = self
+            .lower
+            .iter()
+            .zip(&self.upper)
+            .position(|(lower, upper)| upper < lower)
+        {
             return Err(Error::InvalidBounds { arc });
         }
         Ok(())
@@ -215,10 +221,11 @@ impl<V: Number, C: Number> Solution<V, C> {
 }
 
 /// Why a problem has no optimal solution, or could not be solved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// No flow satisfies the bounds and supply constraints.
+    #[error("the problem has no feasible flow")]
     Infeasible,
     /// The objective is unbounded below.
     ///
@@ -226,32 +233,17 @@ pub enum Error {
     /// infinite capacity is reachable. Cost scaling reports it for any arc
     /// with negative cost and infinite capacity, even if the objective is in
     /// fact bounded over the feasible flows.
+    #[error("the objective is unbounded")]
     Unbounded,
     /// The arc's lower bound exceeds its upper bound.
+    #[error("arc {arc} has a lower bound greater than its upper bound")]
     InvalidBounds { arc: usize },
     /// The problem has more nodes or arcs than the solvers can index.
+    #[error("the problem has too many nodes or arcs")]
     TooLarge,
     /// Cost scaling's internal costs (arc costs multiplied by the node count
     /// and scaling factor) do not fit in its large cost type. Use a wider
     /// large cost type, such as `CostScaling<V, C, i128>`.
+    #[error("scaled arc costs overflow the large cost type")]
     Overflow,
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Infeasible => f.write_str("the problem has no feasible flow"),
-            Error::Unbounded => f.write_str("the objective is unbounded"),
-            Error::InvalidBounds { arc } => {
-                write!(
-                    f,
-                    "arc {arc} has a lower bound greater than its upper bound"
-                )
-            }
-            Error::TooLarge => f.write_str("the problem has too many nodes or arcs"),
-            Error::Overflow => f.write_str("scaled arc costs overflow the large cost type"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}

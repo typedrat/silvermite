@@ -1,7 +1,20 @@
-use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeFrom, RangeTo};
 
-/// Sentinel for "no node" / "no arc" in u32 index arrays.
-pub(crate) const NONE: u32 = u32::MAX;
+use nonmax::NonMaxU32;
+
+/// An optional node or arc index, packed into four bytes by reserving
+/// `u32::MAX` as the niche for `None`.
+pub(crate) type Link = Option<NonMaxU32>;
+
+/// Links to index `i`.
+///
+/// Problems too large to leave `u32::MAX` free are rejected before solving,
+/// so every real index fits.
+#[inline(always)]
+pub(crate) fn link(i: u32) -> Link {
+    debug_assert!(i != u32::MAX);
+    NonMaxU32::new(i)
+}
 
 const CACHE_LINE: usize = 64;
 
@@ -64,6 +77,53 @@ impl<T> IndexMut<u32> for IVec<T> {
     }
 }
 
+// Range indexing, so sub-slices read like `v[..n]` despite the `u32` index
+// impls shadowing the slice's own.
+macro_rules! index_ranges {
+    ($($ty:ident),*) => {$(
+        impl<T> Index<$ty<usize>> for IVec<T> {
+            type Output = [T];
+
+            #[inline(always)]
+            fn index(&self, r: $ty<usize>) -> &[T] {
+                &(**self)[r]
+            }
+        }
+
+        impl<T> IndexMut<$ty<usize>> for IVec<T> {
+            #[inline(always)]
+            fn index_mut(&mut self, r: $ty<usize>) -> &mut [T] {
+                &mut (**self)[r]
+            }
+        }
+
+        impl<T> Index<$ty<usize>> for IMut<'_, T> {
+            type Output = [T];
+
+            #[inline(always)]
+            fn index(&self, r: $ty<usize>) -> &[T] {
+                &self.0[r]
+            }
+        }
+
+        impl<T> IndexMut<$ty<usize>> for IMut<'_, T> {
+            #[inline(always)]
+            fn index_mut(&mut self, r: $ty<usize>) -> &mut [T] {
+                &mut self.0[r]
+            }
+        }
+
+        impl<T> Index<$ty<usize>> for IRef<'_, T> {
+            type Output = [T];
+
+            #[inline(always)]
+            fn index(&self, r: $ty<usize>) -> &[T] {
+                &self.0[r]
+            }
+        }
+    )*};
+}
+
 impl<T> Deref for IVec<T> {
     type Target = [T];
 
@@ -83,6 +143,26 @@ impl<T> DerefMut for IVec<T> {
 /// Hot loops borrow their arrays through these instead of indexing struct
 /// fields, so the slice's pointer and length can stay in registers.
 pub(crate) struct IMut<'a, T>(pub(crate) &'a mut [T]);
+
+impl<T> IMut<'_, T> {
+    pub(crate) fn as_ref(&self) -> IRef<'_, T> {
+        IRef(self.0)
+    }
+}
+
+impl<T> Deref for IMut<'_, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        self.0
+    }
+}
+
+impl<T> DerefMut for IMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        self.0
+    }
+}
 
 impl<T> Index<u32> for IMut<'_, T> {
     type Output = T;
@@ -104,6 +184,14 @@ impl<T> IndexMut<u32> for IMut<'_, T> {
 #[derive(Clone, Copy)]
 pub(crate) struct IRef<'a, T>(pub(crate) &'a [T]);
 
+impl<T> Deref for IRef<'_, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        self.0
+    }
+}
+
 impl<T> Index<u32> for IRef<'_, T> {
     type Output = T;
 
@@ -112,3 +200,5 @@ impl<T> Index<u32> for IRef<'_, T> {
         &self.0[i as usize]
     }
 }
+
+index_ranges!(Range, RangeFrom, RangeTo);

@@ -5,10 +5,11 @@
 //! arc block lists its outgoing arcs (forward), then its incoming arcs
 //! (backward), then one arc to the artificial root.
 
-use crate::ivec::{ArcId, IMut, IRef, IdVec, Idx, NodeId, first_ids, ids};
-use crate::{Error, Number};
 use alloc::vec;
 use alloc::vec::Vec;
+
+use crate::ivec::{ArcId, IMut, IRef, IdVec, Idx, NodeId, first_ids, ids};
+use crate::{Error, Number};
 
 /// The residual graph layout the circulation reads, restricted to the real
 /// nodes `0..node_num`.
@@ -66,75 +67,47 @@ pub(crate) fn circulation<V: Number>(
         }
     }
 
-    while let Some(act) = level.highest_active() {
+    'active: while let Some(act) = level.highest_active() {
         let actlevel = level.level(act);
         let mut mlevel = n;
         let mut exc = excess[act];
-        let mut discharged = false;
 
         for j in ids(g.first_out[act]..g.first_out[act.next()]) {
-            if g.forward[j] {
-                // Outgoing arc: push along it.
-                let v = g.target[j];
-                let fc = cap[j] - flow[j];
-                if fc <= V::zero() {
-                    continue;
-                }
-                if level.level(v) < actlevel {
-                    if fc >= exc {
-                        flow[j] += exc;
-                        excess[v] += exc;
-                        if !level.active(v) && excess[v] > V::zero() {
-                            level.activate(v);
-                        }
-                        excess[act] = V::zero();
-                        level.deactivate(act);
-                        discharged = true;
-                        break;
-                    }
-                    flow[j] = cap[j];
-                    excess[v] += fc;
-                    if !level.active(v) && excess[v] > V::zero() {
-                        level.activate(v);
-                    }
-                    exc -= fc;
-                } else if level.level(v) < mlevel {
-                    mlevel = level.level(v);
-                }
-            } else if g.target[j].index() < n {
-                // Incoming arc: cancel flow on it. The arc to the root is
-                // not part of the circulation's graph.
-                let v = g.target[j];
-                let e = g.reverse[j];
-                let fc = flow[e];
-                if fc <= V::zero() {
-                    continue;
-                }
-                if level.level(v) < actlevel {
-                    if fc >= exc {
-                        flow[e] -= exc;
-                        excess[v] += exc;
-                        if !level.active(v) && excess[v] > V::zero() {
-                            level.activate(v);
-                        }
-                        excess[act] = V::zero();
-                        level.deactivate(act);
-                        discharged = true;
-                        break;
-                    }
-                    flow[e] = V::zero();
-                    excess[v] += fc;
-                    if !level.active(v) && excess[v] > V::zero() {
-                        level.activate(v);
-                    }
-                    exc -= fc;
-                } else if level.level(v) < mlevel {
-                    mlevel = level.level(v);
-                }
+            // Outgoing arcs carry flow forward; incoming arcs carry it by
+            // cancelling their flow. The arc to the root is not part of the
+            // circulation's graph.
+            let v = g.target[j];
+            let residual = if g.forward[j] {
+                cap[j] - flow[j]
+            } else if v.index() < n {
+                flow[g.reverse[j]]
+            } else {
+                continue;
+            };
+            if residual <= V::zero() {
+                continue;
             }
-        }
-        if discharged {
-            continue;
+            if level.level(v) >= actlevel {
+                mlevel = mlevel.min(level.level(v));
+                continue;
+            }
+
+            let pushed = residual.min(exc);
+            if g.forward[j] {
+                flow[j] += pushed;
+            } else {
+                flow[g.reverse[j]] -= pushed;
+            }
+            excess[v] += pushed;
+            if !level.active(v) && excess[v] > V::zero() {
+                level.activate(v);
+            }
+            if residual >= exc {
+                excess[act] = V::zero();
+                level.deactivate(act);
+                continue 'active;
+            }
+            exc -= residual;
         }
 
         excess[act] = exc;

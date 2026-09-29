@@ -11,6 +11,7 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::iter;
 
 use itertools::izip;
 
@@ -730,7 +731,6 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let first_out = self.first_out.as_ref();
         let mut res_cap = self.res_cap.as_mut();
         let mut next_out = self.next_out.as_mut();
-        const MAX_CYCLE_CANCEL: usize = 1;
 
         let n = self.res_node_num;
         let mut reached = IdVec::<NodeId, bool>::filled(n, false);
@@ -738,92 +738,26 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let mut pred = IdVec::<NodeId, Link<NodeId>>::filled(n, Link::NONE);
         next_out.copy_from_slice(&first_out[..NodeId::new(n)]);
         order.clear();
-        let pred_of = |pred: &IdVec<NodeId, Link<NodeId>>, u: NodeId| {
-            pred[u].get().expect("DFS tree nodes have a pred")
-        };
 
-        let mut cycle_cnt = 0usize;
         for start in first_ids::<NodeId>(n) {
             if reached[start] {
                 continue;
             }
 
-            // Start DFS search from this start node
+            // Depth-first search from `start`; `next_out[u]` is the arc the
+            // search last left `u` by.
             pred[start] = Link::NONE;
             let mut tip = start;
+            reached[tip] = true;
             loop {
-                // Check the outgoing arcs of the current tip node
-                reached[tip] = true;
                 let pi_tip = pi[tip];
-                let mut a = next_out[tip];
-                let mut last_out = first_out[tip.next()];
-                while a != last_out {
-                    if res_cap[a] > V::zero() {
-                        let v = target[a];
-                        if cost[a] + pi_tip - pi[v] < L::zero() {
-                            if !reached[v] {
-                                // A new node is reached
-                                reached[v] = true;
-                                pred[v] = Link::to(tip);
-                                next_out[tip] = a;
-                                tip = v;
-                                a = next_out[tip];
-                                last_out = first_out[tip.next()];
-                                break;
-                            } else if !processed[v] {
-                                // A cycle is found
-                                cycle_cnt += 1;
-                                next_out[tip] = a;
+                let admissible = ids(next_out[tip]..first_out[tip.next()]).find(|&a| {
+                    let v = target[a];
+                    res_cap[a] > V::zero() && cost[a] + pi_tip - pi[v] < L::zero() && !processed[v]
+                });
 
-                                // Find the minimum residual capacity along
-                                // the cycle
-                                let mut delta = res_cap[a];
-                                let mut delta_node = tip;
-                                let mut u = tip;
-                                while u != v {
-                                    u = pred_of(&pred, u);
-                                    let d = res_cap[next_out[u]];
-                                    if d <= delta {
-                                        delta = d;
-                                        delta_node = u;
-                                    }
-                                }
-
-                                // Augment along the cycle
-                                res_cap[a] -= delta;
-                                res_cap[reverse[a]] += delta;
-                                let mut u = tip;
-                                while u != v {
-                                    u = pred_of(&pred, u);
-                                    let ca = next_out[u];
-                                    res_cap[ca] -= delta;
-                                    res_cap[reverse[ca]] += delta;
-                                }
-
-                                if cycle_cnt >= MAX_CYCLE_CANCEL {
-                                    return false;
-                                }
-
-                                // Roll back search to delta_node
-                                if delta_node != tip {
-                                    let mut u = tip;
-                                    while u != delta_node {
-                                        reached[u] = false;
-                                        u = pred_of(&pred, u);
-                                    }
-                                    tip = delta_node;
-                                    a = next_out[tip].next();
-                                    last_out = first_out[tip.next()];
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    a = a.next();
-                }
-
-                // Step back to the previous node
-                if a == last_out {
+                let Some(a) = admissible else {
+                    // Every admissible arc out of `tip` is explored: step back.
                     processed[tip] = true;
                     order.push(tip);
                     let Some(p) = pred[tip].get() else {
@@ -831,11 +765,41 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                     };
                     tip = p;
                     next_out[tip] = next_out[tip].next();
+                    continue;
+                };
+
+                next_out[tip] = a;
+                let v = target[a];
+                if !reached[v] {
+                    reached[v] = true;
+                    pred[v] = Link::to(tip);
+                    tip = v;
+                    continue;
                 }
+
+                // `v` is on the current path, so `a` closes an admissible
+                // cycle through the path arcs from `v` to `tip`: saturate
+                // its tightest arc.
+                let cycle = || {
+                    iter::once(a).chain(
+                        iter::successors(Some(tip), |&u| pred[u].get())
+                            .take_while(|&u| u != v)
+                            .map(|u| next_out[pred[u].get().expect("path nodes have a pred")]),
+                    )
+                };
+                let delta = cycle()
+                    .map(|ca| res_cap[ca])
+                    .min()
+                    .expect("a cycle has arcs");
+                for ca in cycle() {
+                    res_cap[ca] -= delta;
+                    res_cap[reverse[ca]] += delta;
+                }
+                return false;
             }
         }
 
-        cycle_cnt == 0
+        true
     }
 
     /// Global update heuristic: relabels nodes by their reduced-cost
@@ -1119,94 +1083,18 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 
             self.init_phase();
 
-            while !self.active_nodes.is_empty() {
-                'next_node: loop {
-                    // Select an active node (FIFO selection)
-                    let n = self.active_nodes[0];
-                    let last_out = self.first_out[n.next()];
-                    let pi_n = self.pi[n];
-                    let mut excess_used_up = false;
-
-                    // Perform push operations if there are admissible arcs
-                    if self.excess[n] > V::zero() {
-                        let mut a = self.next_out[n];
-                        while a != last_out {
-                            let t = self.target[a];
-                            if self.res_cap[a] > V::zero()
-                                && self.cost[a] + pi_n - self.pi[t] < L::zero()
-                            {
-                                let delta = self.res_cap[a].min(self.excess[n]);
-
-                                // Push-look-ahead heuristic
-                                let mut ahead = -self.excess[t];
-                                let pi_t = self.pi[t];
-                                for ta in ids(self.next_out[t]..self.first_out[t.next()]) {
-                                    if self.res_cap[ta] > V::zero()
-                                        && self.cost[ta] + pi_t - self.pi[self.target[ta]]
-                                            < L::zero()
-                                    {
-                                        ahead += self.res_cap[ta];
-                                    }
-                                    if ahead >= delta {
-                                        break;
-                                    }
-                                }
-                                if ahead < V::zero() {
-                                    ahead = V::zero();
-                                }
-
-                                // Push flow along the arc
-                                let r = self.reverse[a];
-                                if ahead < delta && !hyper[t] {
-                                    self.res_cap[a] -= ahead;
-                                    self.res_cap[r] += ahead;
-                                    self.excess[n] -= ahead;
-                                    self.excess[t] += ahead;
-                                    self.active_nodes.push_front(t);
-                                    hyper[t] = true;
-                                    hyper_cost[t] = self.cost[a] + pi_n - pi_t;
-                                    self.next_out[n] = a;
-                                    continue 'next_node;
-                                }
-                                self.res_cap[a] -= delta;
-                                self.res_cap[r] += delta;
-                                self.excess[n] -= delta;
-                                self.excess[t] += delta;
-                                if self.excess[t] > V::zero() && self.excess[t] <= delta {
-                                    self.active_nodes.push_back(t);
-                                }
-
-                                if self.excess[n] == V::zero() {
-                                    excess_used_up = true;
-                                    break;
-                                }
-                            }
-                            a = a.next();
+            while let Some(&n) = self.active_nodes.front() {
+                match self.push_excess(n, &mut hyper, &mut hyper_cost) {
+                    // `n` stays at the front behind the new hyper node.
+                    Pushed::Deferred => continue,
+                    Pushed::UsedUp => {}
+                    Pushed::Stuck => {
+                        if self.excess[n] > V::zero() || hyper[n] {
+                            self.relabel_push(n, hyper[n].then(|| hyper_cost[n]));
+                            hyper[n] = false;
+                            relabel_cnt += 1;
                         }
-                        self.next_out[n] = a;
                     }
-
-                    // Relabel the node if it is still active (or hyper)
-                    if !excess_used_up && (self.excess[n] > V::zero() || hyper[n]) {
-                        let mut min_red_cost = if hyper[n] {
-                            -hyper_cost[n]
-                        } else {
-                            L::max_value()
-                        };
-                        for a in ids(self.first_out[n]..last_out) {
-                            if self.res_cap[a] > V::zero() {
-                                let rc = self.cost[a] + pi_n - self.pi[self.target[a]];
-                                if rc < min_red_cost {
-                                    min_red_cost = rc;
-                                }
-                            }
-                        }
-                        self.pi[n] -= min_red_cost + self.epsilon;
-                        self.next_out[n] = self.first_out[n];
-                        hyper[n] = false;
-                        relabel_cnt += 1;
-                    }
-                    break;
                 }
 
                 // Remove nodes that are neither active nor hyper
@@ -1228,6 +1116,102 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             self.epsilon = self.next_epsilon();
         }
     }
+
+    /// Pushes excess out of `n` along admissible arcs, resuming from
+    /// `next_out[n]`.
+    #[inline]
+    fn push_excess(
+        &mut self,
+        n: NodeId,
+        hyper: &mut IdVec<NodeId, bool>,
+        hyper_cost: &mut IdVec<NodeId, L>,
+    ) -> Pushed {
+        if self.excess[n] <= V::zero() {
+            return Pushed::Stuck;
+        }
+        let pi_n = self.pi[n];
+        let mut a = self.next_out[n];
+        let last_out = self.first_out[n.next()];
+        while a != last_out {
+            let t = self.target[a];
+            if self.res_cap[a] > V::zero() && self.cost[a] + pi_n - self.pi[t] < L::zero() {
+                let delta = self.res_cap[a].min(self.excess[n]);
+
+                // Push-look-ahead heuristic: how much `t` can pass on
+                let mut ahead = -self.excess[t];
+                let pi_t = self.pi[t];
+                for ta in ids(self.next_out[t]..self.first_out[t.next()]) {
+                    if self.res_cap[ta] > V::zero()
+                        && self.cost[ta] + pi_t - self.pi[self.target[ta]] < L::zero()
+                    {
+                        ahead += self.res_cap[ta];
+                    }
+                    if ahead >= delta {
+                        break;
+                    }
+                }
+                let ahead = ahead.max(V::zero());
+
+                // Push flow along the arc
+                let r = self.reverse[a];
+                if ahead < delta && !hyper[t] {
+                    self.res_cap[a] -= ahead;
+                    self.res_cap[r] += ahead;
+                    self.excess[n] -= ahead;
+                    self.excess[t] += ahead;
+                    self.active_nodes.push_front(t);
+                    hyper[t] = true;
+                    hyper_cost[t] = self.cost[a] + pi_n - pi_t;
+                    self.next_out[n] = a;
+                    return Pushed::Deferred;
+                }
+                self.res_cap[a] -= delta;
+                self.res_cap[r] += delta;
+                self.excess[n] -= delta;
+                self.excess[t] += delta;
+                if self.excess[t] > V::zero() && self.excess[t] <= delta {
+                    self.active_nodes.push_back(t);
+                }
+
+                if self.excess[n] == V::zero() {
+                    self.next_out[n] = a;
+                    return Pushed::UsedUp;
+                }
+            }
+            a = a.next();
+        }
+        self.next_out[n] = a;
+        Pushed::Stuck
+    }
+
+    /// Lowers the potential of `n` just enough to make an arc out of it
+    /// admissible. A hyper node also counts the arc its partial push came
+    /// in by, whose reduced cost was `hyper_cost`.
+    fn relabel_push(&mut self, n: NodeId, hyper_cost: Option<L>) {
+        let pi_n = self.pi[n];
+        let mut min_red_cost = hyper_cost.map_or(L::max_value(), |c| -c);
+        for a in self.block(n) {
+            if self.res_cap[a] > V::zero() {
+                let rc = self.cost[a] + pi_n - self.pi[self.target[a]];
+                if rc < min_red_cost {
+                    min_red_cost = rc;
+                }
+            }
+        }
+        self.pi[n] -= min_red_cost + self.epsilon;
+        self.next_out[n] = self.first_out[n];
+    }
+}
+
+/// How a round of pushes out of a node ended.
+enum Pushed {
+    /// All of the node's excess moved on.
+    UsedUp,
+    /// Part of a push went to a node that could not pass it all on. That
+    /// node is now hyper and queued in front, to be processed first.
+    Deferred,
+    /// The node had no excess, or its admissible arcs ran out first.
+    Stuck,
 }
 
 /// Doubly linked lists of nodes by rank; `first[r]` heads the list of rank

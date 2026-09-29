@@ -6,7 +6,7 @@ use core::iter;
 use super::CostScaling;
 use super::global_update::Buckets;
 use crate::Number;
-use crate::ivec::{IdVec, Idx, Link, NodeId, first_ids, ids};
+use crate::ivec::{IdVec, Idx, Link, NodeIx, first_ids, ids};
 
 impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// Price refinement heuristic: tries to make the current flow
@@ -123,7 +123,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// Topologically sorts the admissible network by DFS into `order`,
     /// sources last. If the DFS finds an admissible cycle instead, cancels it
     /// and returns false.
-    fn topological_sort(&mut self, order: &mut Vec<NodeId>) -> bool {
+    fn topological_sort(&mut self, order: &mut Vec<NodeIx>) -> bool {
         let pi = self.pi.as_ref();
         let target = self.target.as_ref();
         let cost = self.cost.as_ref();
@@ -133,13 +133,13 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let mut next_out = self.next_out.as_mut();
 
         let n = self.res_node_num;
-        let mut reached = IdVec::<NodeId, bool>::filled(n, false);
-        let mut processed = IdVec::<NodeId, bool>::filled(n, false);
-        let mut pred = IdVec::<NodeId, Link<NodeId>>::filled(n, Link::NONE);
-        next_out.copy_from_slice(&first_out[..NodeId::new(n)]);
+        let mut reached = IdVec::<NodeIx, bool>::filled(n, false);
+        let mut processed = IdVec::<NodeIx, bool>::filled(n, false);
+        let mut pred = IdVec::<NodeIx, Link<NodeIx>>::filled(n, Link::NONE);
+        next_out.copy_from_slice(&first_out[..NodeIx::new(n)]);
         order.clear();
 
-        for start in first_ids::<NodeId>(n) {
+        for start in first_ids::<NodeIx>(n) {
             if reached[start] {
                 continue;
             }

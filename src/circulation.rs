@@ -8,17 +8,17 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::ivec::{ArcId, IMut, IRef, IdVec, Idx, NodeId, first_ids, ids};
+use crate::ivec::{ArcIx, IMut, IRef, IdVec, Idx, NodeIx, first_ids, ids};
 use crate::{Error, Number};
 
 /// The residual graph layout the circulation reads, restricted to the real
 /// nodes `0..node_num`.
 pub(crate) struct Layout<'a> {
     pub node_num: usize,
-    pub first_out: IRef<'a, NodeId, ArcId>,
-    pub forward: IRef<'a, ArcId, bool>,
-    pub target: IRef<'a, ArcId, NodeId>,
-    pub reverse: IRef<'a, ArcId, ArcId>,
+    pub first_out: IRef<'a, NodeIx, ArcIx>,
+    pub forward: IRef<'a, ArcIx, bool>,
+    pub target: IRef<'a, ArcIx, NodeIx>,
+    pub reverse: IRef<'a, ArcIx, ArcIx>,
 }
 
 /// Searches for a flow with `0 <= flow <= cap` on every arc and
@@ -29,14 +29,14 @@ pub(crate) struct Layout<'a> {
 /// Fails with [`Error::Infeasible`] if no such flow exists.
 pub(crate) fn circulation<V: Number>(
     g: &Layout<'_>,
-    arcs: &[ArcId],
-    cap: IRef<'_, ArcId, V>,
-    supply: IRef<'_, NodeId, V>,
-    mut flow: IMut<'_, ArcId, V>,
+    arcs: &[ArcIx],
+    cap: IRef<'_, ArcIx, V>,
+    supply: IRef<'_, NodeIx, V>,
+    mut flow: IMut<'_, ArcIx, V>,
 ) -> Result<(), Error> {
     let n = g.node_num;
-    let mut excess = IdVec::<NodeId, V>::filled(n, V::zero());
-    excess.copy_from_slice(&supply[..NodeId::new(n)]);
+    let mut excess = IdVec::<NodeIx, V>::filled(n, V::zero());
+    excess.copy_from_slice(&supply[..NodeIx::new(n)]);
 
     // Greedy initialization: send as much as the target still demands.
     // Arcs are visited newest-first; on inputs listed by source node, as
@@ -61,7 +61,7 @@ pub(crate) fn circulation<V: Number>(
     }
 
     let mut level = Elevator::new(n);
-    for (v, &ex) in first_ids::<NodeId>(n).zip(&*excess) {
+    for (v, &ex) in first_ids::<NodeIx>(n).zip(&*excess) {
         if ex > V::zero() {
             level.activate(v);
         }
@@ -135,9 +135,9 @@ pub(crate) fn circulation<V: Number>(
 /// first, at `first[l]..active_end[l]`.
 struct Elevator {
     max_level: usize,
-    items: Vec<NodeId>,
-    where_: IdVec<NodeId, usize>,
-    level: IdVec<NodeId, usize>,
+    items: Vec<NodeIx>,
+    where_: IdVec<NodeIx, usize>,
+    level: IdVec<NodeIx, usize>,
     first: Vec<usize>,
     active_end: Vec<usize>,
     highest_active: Option<usize>,
@@ -177,20 +177,20 @@ impl Elevator {
     }
 
     #[inline]
-    fn copy_item(&mut self, item: NodeId, p: usize) {
+    fn copy_item(&mut self, item: NodeIx, p: usize) {
         self.items[p] = item;
         self.where_[item] = p;
     }
 
-    fn level(&self, i: NodeId) -> usize {
+    fn level(&self, i: NodeIx) -> usize {
         self.level[i]
     }
 
-    fn active(&self, i: NodeId) -> bool {
+    fn active(&self, i: NodeIx) -> bool {
         self.where_[i] < self.active_end[self.level(i)]
     }
 
-    fn activate(&mut self, i: NodeId) {
+    fn activate(&mut self, i: NodeIx) {
         let l = self.level(i);
         self.swap(self.where_[i], self.active_end[l]);
         self.active_end[l] += 1;
@@ -199,7 +199,7 @@ impl Elevator {
         }
     }
 
-    fn deactivate(&mut self, i: NodeId) {
+    fn deactivate(&mut self, i: NodeIx) {
         let l = self.level(i);
         self.active_end[l] -= 1;
         self.swap(self.where_[i], self.active_end[l]);
@@ -219,7 +219,7 @@ impl Elevator {
         self.first[l + 1] - self.first[l]
     }
 
-    fn highest_active(&self) -> Option<NodeId> {
+    fn highest_active(&self) -> Option<NodeIx> {
         self.highest_active
             .map(|h| self.items[self.active_end[h] - 1])
     }

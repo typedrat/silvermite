@@ -81,12 +81,12 @@ macro_rules! id_type {
 
 id_type!(
     /// A node of a solver's internal graph.
-    NodeId
+    NodeIx
 );
 
 id_type!(
     /// An arc of a solver's internal graph.
-    ArcId
+    ArcIx
 );
 
 /// The indices in `range`, in order.

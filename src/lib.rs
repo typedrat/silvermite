@@ -58,7 +58,7 @@ pub mod petgraph;
 pub use cost_scaling::{CostScaling, Method};
 pub use network_simplex::{NetworkSimplex, PivotRule};
 pub use num::Number;
-pub use problem::{Arc, Capacity, Error, Node, Problem, Solution, SupplyType};
+pub use problem::{ArcId, Capacity, Error, NodeId, Problem, Solution, SupplyType};
 
 /// Which solver [`solve`] uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

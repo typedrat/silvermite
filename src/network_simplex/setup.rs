@@ -3,7 +3,7 @@
 use itertools::izip;
 
 use super::{ArcState, Dir, NetworkSimplex};
-use crate::ivec::{ArcId, Idx, NodeId, first_ids};
+use crate::ivec::{ArcIx, Idx, NodeIx, first_ids};
 use crate::{Error, Number, Problem, SupplyType};
 
 impl<V: Number, C: Number> NetworkSimplex<V, C> {
@@ -15,8 +15,8 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         let all_node_num = n + 1;
         let max_arc_num = m + 2 * n;
 
-        self.source.reset(max_arc_num, NodeId::default());
-        self.target.reset(max_arc_num, NodeId::default());
+        self.source.reset(max_arc_num, NodeIx::default());
+        self.target.reset(max_arc_num, NodeIx::default());
         self.lower.reset(m, V::zero());
         self.upper.reset(m, V::zero());
         self.cap.reset(max_arc_num, V::zero());
@@ -25,13 +25,13 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         self.flow.reset(max_arc_num, V::zero());
         self.pi.reset(all_node_num, C::zero());
 
-        self.parent.reset(all_node_num, NodeId::default());
-        self.pred.reset(all_node_num, ArcId::default());
+        self.parent.reset(all_node_num, NodeIx::default());
+        self.pred.reset(all_node_num, ArcIx::default());
         self.pred_dir.reset(all_node_num, Dir::Up);
-        self.thread.reset(all_node_num, NodeId::default());
-        self.rev_thread.reset(all_node_num, NodeId::default());
+        self.thread.reset(all_node_num, NodeIx::default());
+        self.rev_thread.reset(all_node_num, NodeIx::default());
         self.succ_num.reset(all_node_num, 0);
-        self.last_succ.reset(all_node_num, NodeId::default());
+        self.last_succ.reset(all_node_num, NodeIx::default());
         self.state.reset(max_arc_num, ArcState::Tree);
 
         self.arc_id.clear();
@@ -39,9 +39,9 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             // Deal arcs round-robin into `skip` interleaved runs.
             let skip = (m / n).max(3);
             self.arc_id
-                .extend((0..skip).flat_map(|j| (j..m).step_by(skip)).map(ArcId::new));
+                .extend((0..skip).flat_map(|j| (j..m).step_by(skip)).map(ArcIx::new));
         } else {
-            self.arc_id.extend(first_ids::<ArcId>(m));
+            self.arc_id.extend(first_ids::<ArcIx>(m));
         }
 
         for (&i, &source, &target, &lower, &upper, &cost) in izip!(
@@ -58,7 +58,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             self.upper[i] = upper;
             self.cost[i] = cost;
         }
-        self.supply[..NodeId::new(n)].copy_from_slice(&p.supply);
+        self.supply[..NodeIx::new(n)].copy_from_slice(&p.supply);
         self.has_lower = p.lower.iter().any(|&l| l != V::zero());
         self.stype = p.supply_type;
     }
@@ -66,8 +66,8 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     pub(super) fn init(&mut self) -> Result<(), Error> {
         let n = self.node_num;
         let m = self.arc_num;
-        let arcs = ..ArcId::new(m);
-        let root = NodeId::new(n);
+        let arcs = ..ArcIx::new(m);
+        let root = NodeIx::new(n);
         self.root = root;
         let inf = V::max_value();
         let max = V::max_value();
@@ -116,7 +116,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
         // Start from the tree where every node hangs directly off the
         // artificial root, in thread order 0, 1, ..., n - 1. The root has no
         // pred arc, so its pred entry is never read.
-        let first = NodeId::new(0);
+        let first = NodeIx::new(0);
         self.parent.fill(root);
         self.succ_num.fill(1);
         self.succ_num[root] = n as u32 + 1;
@@ -139,8 +139,8 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             Dir::Down
         };
         self.search_arc_num = if has_slack { m + n } else { m };
-        let mut next_extra = ArcId::new(m + n);
-        for u in first_ids::<NodeId>(n) {
+        let mut next_extra = ArcIx::new(m + n);
+        for u in first_ids::<NodeIx>(n) {
             self.thread[u] = u.next();
             self.rev_thread[u.next()] = u;
             self.last_succ[u] = u;
@@ -152,7 +152,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 Dir::Down
             };
             let cost = if dir == costly { art_cost } else { C::zero() };
-            let mut e = ArcId::new(m + u.index());
+            let mut e = ArcIx::new(m + u.index());
             if has_slack && dir == costly {
                 self.set_artificial(e, u, dir.reversed(), V::zero(), C::zero(), ArcState::Lower);
                 e = next_extra;
@@ -171,7 +171,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
     /// Sets up the infinite-capacity artificial arc `e` between node `u` and
     /// the root, oriented `dir` relative to `u`.
-    fn set_artificial(&mut self, e: ArcId, u: NodeId, dir: Dir, flow: V, cost: C, state: ArcState) {
+    fn set_artificial(&mut self, e: ArcIx, u: NodeIx, dir: Dir, flow: V, cost: C, state: ArcState) {
         let (source, target) = match dir {
             Dir::Up => (u, self.root),
             Dir::Down => (self.root, u),

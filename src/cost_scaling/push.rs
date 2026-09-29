@@ -2,7 +2,7 @@
 
 use super::CostScaling;
 use crate::Number;
-use crate::ivec::{IdVec, NodeId, ids};
+use crate::ivec::{IdVec, NodeIx, ids};
 
 /// How a round of pushes out of a node ended.
 enum Pushed {
@@ -26,8 +26,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         // A "hyper" node received only part of a push because it could not
         // pass the whole amount on; it is processed next and relabeled even
         // without excess.
-        let mut hyper = IdVec::<NodeId, bool>::filled(self.res_node_num, false);
-        let mut hyper_cost = IdVec::<NodeId, L>::filled(self.res_node_num, L::zero());
+        let mut hyper = IdVec::<NodeIx, bool>::filled(self.res_node_num, false);
+        let mut hyper_cost = IdVec::<NodeIx, L>::filled(self.res_node_num, L::zero());
         let mut relabel_cnt = 0u64;
         let mut eps_phase_cnt = 0usize;
         while self.epsilon >= L::one() {
@@ -79,9 +79,9 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     #[inline]
     fn push_excess(
         &mut self,
-        n: NodeId,
-        hyper: &mut IdVec<NodeId, bool>,
-        hyper_cost: &mut IdVec<NodeId, L>,
+        n: NodeIx,
+        hyper: &mut IdVec<NodeIx, bool>,
+        hyper_cost: &mut IdVec<NodeIx, L>,
     ) -> Pushed {
         if self.excess[n] <= V::zero() {
             return Pushed::Stuck;
@@ -144,7 +144,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// Lowers the potential of `n` just enough to make an arc out of it
     /// admissible. A hyper node also counts the arc its partial push came
     /// in by, whose reduced cost was `hyper_cost`.
-    fn relabel_push(&mut self, n: NodeId, hyper_cost: Option<L>) {
+    fn relabel_push(&mut self, n: NodeIx, hyper_cost: Option<L>) {
         let pi_n = self.pi[n];
         let mut min_red_cost = hyper_cost.map_or(L::max_value(), |c| -c);
         for a in self.block(n) {

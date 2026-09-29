@@ -13,7 +13,7 @@ use itertools::izip;
 use self::pivot_rules::{
     AlteringList, BestEligible, BlockSearch, CandidateList, FirstEligible, Pivot, PivotView,
 };
-use crate::ivec::{ArcId, IVec, Idx, NodeId};
+use crate::ivec::{ArcIx, IVec, Idx, NodeIx};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
 mod pivot_rules;
@@ -136,29 +136,29 @@ pub struct NetworkSimplex<V, C> {
 
     // Internal arc index of each problem arc; differs from the identity when
     // arc mixing is on.
-    arc_id: Vec<ArcId>,
-    source: IVec<ArcId, NodeId>,
-    target: IVec<ArcId, NodeId>,
+    arc_id: Vec<ArcIx>,
+    source: IVec<ArcIx, NodeIx>,
+    target: IVec<ArcIx, NodeIx>,
 
-    lower: IVec<ArcId, V>,
-    upper: IVec<ArcId, V>,
-    cap: IVec<ArcId, V>,
-    cost: IVec<ArcId, C>,
-    supply: IVec<NodeId, V>,
-    flow: IVec<ArcId, V>,
-    pi: IVec<NodeId, C>,
+    lower: IVec<ArcIx, V>,
+    upper: IVec<ArcIx, V>,
+    cap: IVec<ArcIx, V>,
+    cost: IVec<ArcIx, C>,
+    supply: IVec<NodeIx, V>,
+    flow: IVec<ArcIx, V>,
+    pi: IVec<NodeIx, C>,
 
     // Spanning tree. The root is its own parent.
-    parent: IVec<NodeId, NodeId>,
-    pred: IVec<NodeId, ArcId>,
-    thread: IVec<NodeId, NodeId>,
-    rev_thread: IVec<NodeId, NodeId>,
-    succ_num: IVec<NodeId, u32>,
-    last_succ: IVec<NodeId, NodeId>,
-    pred_dir: IVec<NodeId, Dir>,
-    state: IVec<ArcId, ArcState>,
-    dirty_revs: Vec<NodeId>,
-    root: NodeId,
+    parent: IVec<NodeIx, NodeIx>,
+    pred: IVec<NodeIx, ArcIx>,
+    thread: IVec<NodeIx, NodeIx>,
+    rev_thread: IVec<NodeIx, NodeIx>,
+    succ_num: IVec<NodeIx, u32>,
+    last_succ: IVec<NodeIx, NodeIx>,
+    pred_dir: IVec<NodeIx, Dir>,
+    state: IVec<ArcIx, ArcState>,
+    dirty_revs: Vec<NodeIx>,
+    root: NodeIx,
 }
 
 impl<V: Number, C: Number> Default for NetworkSimplex<V, C> {
@@ -198,7 +198,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             pred_dir: IVec::slot(15),
             state: IVec::slot(16),
             dirty_revs: Vec::new(),
-            root: NodeId::default(),
+            root: NodeIx::default(),
         }
     }
 
@@ -251,7 +251,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     }
 
     #[inline(always)]
-    fn reduced_cost(&self, e: ArcId) -> C {
+    fn reduced_cost(&self, e: ArcIx) -> C {
         self.state[e].sign::<C>()
             * (self.cost[e] + self.pi[self.source[e]] - self.pi[self.target[e]])
     }
@@ -273,19 +273,19 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             let Some(in_arc) = pivot.find_entering_arc(&view) else {
                 break;
             };
-            self.pivot(ArcId::new(in_arc))?;
+            self.pivot(ArcIx::new(in_arc))?;
         }
 
         // Flow left on an artificial arc outside the search range means some
         // supply could not be routed.
-        let unsearched = ArcId::new(self.search_arc_num)..ArcId::new(self.all_arc_num);
+        let unsearched = ArcIx::new(self.search_arc_num)..ArcIx::new(self.all_arc_num);
         if self.flow[unsearched].iter().any(|&f| f != V::zero()) {
             return Err(Error::Infeasible);
         }
 
         // Transform the solution and the supply map to the original form
         if self.has_lower {
-            let arcs = ..ArcId::new(self.arc_num);
+            let arcs = ..ArcIx::new(self.arc_num);
             for (flow, &c, &source, &target) in izip!(
                 &mut self.flow[arcs],
                 &self.lower[arcs],

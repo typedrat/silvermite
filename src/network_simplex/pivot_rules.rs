@@ -7,15 +7,15 @@ use core::ops::{ControlFlow, Range};
 
 use super::ArcState;
 use crate::Number;
-use crate::ivec::{IRef, NodeId};
+use crate::ivec::{IRef, NodeIx};
 
 /// The parts of the solver state a pivot rule reads.
 pub(super) struct PivotView<'a, C> {
-    pub(super) source: &'a [NodeId],
-    pub(super) target: &'a [NodeId],
+    pub(super) source: &'a [NodeIx],
+    pub(super) target: &'a [NodeIx],
     pub(super) cost: &'a [C],
     pub(super) state: &'a [ArcState],
-    pub(super) pi: IRef<'a, NodeId, C>,
+    pub(super) pi: IRef<'a, NodeIx, C>,
     pub(super) search_arc_num: usize,
 }
 

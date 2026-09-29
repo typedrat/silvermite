@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Rng, Solver, check_solution};
-use silvermite::{Capacity, Error, Node, Number, Problem, SupplyType};
+use silvermite::{Capacity, Error, NodeId, Number, Problem, SupplyType};
 
 /// A small random instance mixing lower bounds (some negative), infinite
 /// capacities, negative costs, self-loops, parallel arcs, and all three
@@ -18,7 +18,7 @@ fn random_problem<T: Number>(
     let n = rng.range(1, 25) as usize;
     let m = rng.range(n as i64 - 1, 4 * n as i64) as usize;
     let mut p = Problem::new(n);
-    let random_node = |rng: &mut Rng| Node::new(rng.range(0, n as i64 - 1) as usize);
+    let random_node = |rng: &mut Rng| NodeId::new(rng.range(0, n as i64 - 1) as usize);
     let mut negative_infinite = false;
     for _ in 0..m {
         let s = random_node(rng);

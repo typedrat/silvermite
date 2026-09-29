@@ -5,7 +5,7 @@
 use core::iter;
 
 use super::{ArcState, Dir, NetworkSimplex};
-use crate::ivec::{ArcId, IRef, NodeId};
+use crate::ivec::{ArcIx, IRef, NodeIx};
 use crate::{Error, Number};
 
 /// The tree arc a pivot removes, and how the entering arc replaces it.
@@ -13,20 +13,20 @@ use crate::{Error, Number};
 struct Exchange {
     /// The entering arc's endpoint in the subtree cut off by removing the
     /// leaving arc.
-    u_in: NodeId,
+    u_in: NodeIx,
     /// The entering arc's other endpoint, which becomes `u_in`'s parent.
-    v_in: NodeId,
+    v_in: NodeIx,
     /// The child end of the leaving arc.
-    u_out: NodeId,
+    u_out: NodeIx,
 }
 
 /// The nodes from `from` up to, but not including, its ancestor `to`.
 #[inline(always)]
 fn path_up(
-    parent: IRef<'_, NodeId, NodeId>,
-    from: NodeId,
-    to: NodeId,
-) -> impl Iterator<Item = NodeId> + '_ {
+    parent: IRef<'_, NodeIx, NodeIx>,
+    from: NodeIx,
+    to: NodeIx,
+) -> impl Iterator<Item = NodeIx> + '_ {
     let mut u = from;
     iter::from_fn(move || {
         if u == to {
@@ -40,14 +40,14 @@ fn path_up(
 
 /// The nodes from `from` up to and including the root.
 #[inline(always)]
-fn ancestors(parent: IRef<'_, NodeId, NodeId>, from: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+fn ancestors(parent: IRef<'_, NodeIx, NodeIx>, from: NodeIx) -> impl Iterator<Item = NodeIx> + '_ {
     iter::successors(Some(from), move |&u| Some(parent[u]).filter(|&p| p != u))
 }
 
 impl<V: Number, C: Number> NetworkSimplex<V, C> {
     /// The nearest common ancestor of `in_arc`'s endpoints, where the cycle
     /// it closes in the tree turns around.
-    fn find_join_node(&self, in_arc: ArcId) -> NodeId {
+    fn find_join_node(&self, in_arc: ArcIx) -> NodeIx {
         let succ_num = self.succ_num.as_ref();
         let parent = self.parent.as_ref();
         let mut u = self.source[in_arc];
@@ -67,7 +67,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     /// Finds how much flow can be pushed around the cycle `in_arc` closes,
     /// and which arc blocks it. The exchange is `None` when `in_arc` blocks
     /// itself, so it only moves to its other bound.
-    fn find_leaving_arc(&self, in_arc: ArcId, join: NodeId) -> (V, Option<Exchange>) {
+    fn find_leaving_arc(&self, in_arc: ArcIx, join: NodeIx) -> (V, Option<Exchange>) {
         let state = self.state.as_ref();
         let source = self.source.as_ref();
         let target = self.target.as_ref();
@@ -90,7 +90,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
         // How far flow can be pushed along the pred arc of `u` when the
         // cycle runs through it in direction `along`.
-        let residual = |u: NodeId, along: Dir| {
+        let residual = |u: NodeIx, along: Dir| {
             let e = pred[u];
             let d = flow[e];
             if pred_dir[u] == along {
@@ -131,7 +131,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     }
 
     /// Pushes `delta` around the cycle and updates the arc states.
-    fn change_flow(&mut self, in_arc: ArcId, join: NodeId, delta: V, exchange: Option<Exchange>) {
+    fn change_flow(&mut self, in_arc: ArcIx, join: NodeIx, delta: V, exchange: Option<Exchange>) {
         let source = self.source.as_ref();
         let target = self.target.as_ref();
         let pred = self.pred.as_ref();
@@ -164,7 +164,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     }
 
     /// Replaces the leaving arc with `in_arc` in the spanning tree.
-    fn update_tree_structure(&mut self, in_arc: ArcId, join: NodeId, exchange: Exchange) {
+    fn update_tree_structure(&mut self, in_arc: ArcIx, join: NodeIx, exchange: Exchange) {
         let source = self.source.as_ref();
         let mut parent = self.parent.as_mut();
         let mut pred = self.pred.as_mut();
@@ -318,7 +318,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
     /// Shifts the potentials of the subtree that moved under v_in so the
     /// entering arc has zero reduced cost.
-    fn update_potential(&mut self, in_arc: ArcId, exchange: Exchange) {
+    fn update_potential(&mut self, in_arc: ArcIx, exchange: Exchange) {
         let cost = self.cost.as_ref();
         let pred_dir = self.pred_dir.as_ref();
         let thread = self.thread.as_ref();
@@ -337,7 +337,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
     /// Pivots `in_arc` into the basis. Fails if the cycle it closes has
     /// infinite capacity, i.e. the problem is unbounded.
     #[inline]
-    pub(super) fn pivot(&mut self, in_arc: ArcId) -> Result<(), Error> {
+    pub(super) fn pivot(&mut self, in_arc: ArcIx) -> Result<(), Error> {
         let join = self.find_join_node(in_arc);
         let (delta, exchange) = self.find_leaving_arc(in_arc, join);
         if delta >= V::max_value() {

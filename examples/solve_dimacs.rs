@@ -7,7 +7,9 @@
 
 use std::time::Instant;
 
-use silvermite::{Capacity, CostScaling, Error, Method, NetworkSimplex, Node, Problem, SupplyType};
+use silvermite::{
+    Capacity, CostScaling, Error, Method, NetworkSimplex, NodeId, Problem, SupplyType,
+};
 
 fn read_dimacs(text: &str) -> Problem<i64, i64> {
     let mut problem = Problem::new(0);
@@ -22,7 +24,7 @@ fn read_dimacs(text: &str) -> Problem<i64, i64> {
         }
         let nums: Vec<i64> = fields.map(|f| f.parse().expect("bad number")).collect();
         // DIMACS node ids start at 1.
-        let node = |id: i64| Node::new(id as usize - 1);
+        let node = |id: i64| NodeId::new(id as usize - 1);
         match (tag, nums.as_slice()) {
             (Some("p"), &[n, m]) => problem = Problem::with_capacity(n as usize, m as usize),
             (Some("n"), &[id, supply]) => problem.set_supply(node(id), supply),

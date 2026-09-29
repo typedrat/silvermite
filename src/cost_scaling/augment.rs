@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use super::CostScaling;
 use crate::Number;
-use crate::ivec::{ArcId, IdVec, ids};
+use crate::ivec::{ArcIx, IdVec, ids};
 
 impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// Runs the phases with (partial) augment and relabel operations.
@@ -14,7 +14,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let global_update_skip = self.global_update_interval(GLOBAL_UPDATE_FACTOR);
         let mut next_global_update_limit = global_update_skip;
 
-        let mut path: Vec<ArcId> = Vec::new();
+        let mut path: Vec<ArcIx> = Vec::new();
         let mut path_arc = IdVec::filled(self.res_arc_num, false);
         let mut relabel_cnt = 0u64;
         let mut eps_phase_cnt = 0usize;
@@ -49,8 +49,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     fn augment_until(
         &mut self,
         max_length: usize,
-        path: &mut Vec<ArcId>,
-        path_arc: &mut IdVec<ArcId, bool>,
+        path: &mut Vec<ArcIx>,
+        path_arc: &mut IdVec<ArcIx, bool>,
         relabel_cnt: &mut u64,
         relabel_limit: u64,
     ) -> bool {

@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Solver, check_solution};
-use silvermite::{Capacity, Error, Node, Number, Problem, SupplyType};
+use silvermite::{Capacity, Error, NodeId, Number, Problem, SupplyType};
 
 // Columns: source, target, cost, cap, low1, low2, low3 (1-based node labels)
 const ARCS: [[i32; 7]; 21] = [
@@ -74,8 +74,8 @@ enum Upper {
 }
 
 /// The node with a 1-based label from the tables above.
-fn node(label: i32) -> Node {
-    Node::new(label as usize - 1)
+fn node(label: i32) -> NodeId {
+    NodeId::new(label as usize - 1)
 }
 
 fn main_graph<T: Number>(lower: usize, upper: Upper, cost: Cost, supply: usize) -> Problem<T, T> {

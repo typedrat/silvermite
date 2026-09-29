@@ -12,7 +12,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::ivec::{ArcId, IVec, IdVec, Idx, Link, NodeId, first_ids, ids};
+use crate::ivec::{ArcIx, IVec, IdVec, Idx, Link, NodeIx, first_ids, ids};
 use crate::{Error, Number, Problem, Solution};
 
 mod augment;
@@ -75,7 +75,7 @@ pub struct CostScaling<V, C, L = i64> {
     node_num: usize,
     res_node_num: usize,
     res_arc_num: usize,
-    root: NodeId,
+    root: NodeIx,
     // Whether the problem was mirrored to turn LEQ constraints into GEQ.
     mirrored: bool,
 
@@ -84,37 +84,37 @@ pub struct CostScaling<V, C, L = i64> {
     sup_node_num: usize,
 
     // Forward and backward residual arc of each problem arc
-    arc_idf: Vec<ArcId>,
-    arc_idb: Vec<ArcId>,
+    arc_idf: Vec<ArcIx>,
+    arc_idb: Vec<ArcIx>,
     // Node `u`'s arc block is `first_out[u]..first_out[u.next()]`.
-    first_out: IVec<NodeId, ArcId>,
-    forward: IVec<ArcId, bool>,
-    source: IVec<ArcId, NodeId>,
-    target: IVec<ArcId, NodeId>,
-    reverse: IVec<ArcId, ArcId>,
+    first_out: IVec<NodeIx, ArcIx>,
+    forward: IVec<ArcIx, bool>,
+    source: IVec<ArcIx, NodeIx>,
+    target: IVec<ArcIx, NodeIx>,
+    reverse: IVec<ArcIx, ArcIx>,
 
-    lower: IVec<ArcId, V>,
-    upper: IVec<ArcId, V>,
-    scost: IVec<ArcId, C>,
-    supply: IVec<NodeId, V>,
+    lower: IVec<ArcIx, V>,
+    upper: IVec<ArcIx, V>,
+    scost: IVec<ArcIx, C>,
+    supply: IVec<NodeIx, V>,
 
-    res_cap: IVec<ArcId, V>,
+    res_cap: IVec<ArcIx, V>,
     // Forward arcs whose capacity was infinite before being bounded by the
     // total deficit.
-    uncapped: IVec<ArcId, bool>,
-    cost: IVec<ArcId, L>,
-    pi: IVec<NodeId, L>,
-    excess: IVec<NodeId, V>,
-    next_out: IVec<NodeId, ArcId>,
-    active_nodes: VecDeque<NodeId>,
+    uncapped: IVec<ArcIx, bool>,
+    cost: IVec<ArcIx, L>,
+    pi: IVec<NodeIx, L>,
+    excess: IVec<NodeIx, V>,
+    next_out: IVec<NodeIx, ArcIx>,
+    active_nodes: VecDeque<NodeIx>,
 
     epsilon: L,
 
     // Bucket list heads, indexed by rank
-    buckets: IVec<usize, Link<NodeId>>,
-    bucket_next: IVec<NodeId, Link<NodeId>>,
-    bucket_prev: IVec<NodeId, NodeId>,
-    rank: IVec<NodeId, u32>,
+    buckets: IVec<usize, Link<NodeIx>>,
+    bucket_next: IVec<NodeIx, Link<NodeIx>>,
+    bucket_prev: IVec<NodeIx, NodeIx>,
+    rank: IVec<NodeIx, u32>,
     max_rank: u32,
 }
 
@@ -134,7 +134,7 @@ impl<V: Number, C: Number, L: Number> Default for CostScaling<V, C, L> {
             node_num: 0,
             res_node_num: 0,
             res_arc_num: 0,
-            root: NodeId::default(),
+            root: NodeIx::default(),
             mirrored: false,
             has_lower: false,
             sum_supply: V::zero(),
@@ -221,7 +221,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 
     /// The arcs out of `u` in the residual graph.
     #[inline(always)]
-    fn block(&self, u: NodeId) -> impl DoubleEndedIterator<Item = ArcId> + Clone + use<V, C, L> {
+    fn block(&self, u: NodeIx) -> impl DoubleEndedIterator<Item = ArcIx> + Clone + use<V, C, L> {
         ids(self.first_out[u]..self.first_out[u.next()])
     }
 
@@ -247,7 +247,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         // paths in the residual graph if so. Originally infinite arcs count
         // as open even when saturated at their finite stand-in capacity, or
         // the potentials would not certify optimality for the real problem.
-        let optimal = first_ids::<NodeId>(self.res_node_num).all(|i| {
+        let optimal = first_ids::<NodeIx>(self.res_node_num).all(|i| {
             self.block(i).all(|j| {
                 !self.is_open(j)
                     || self.scost[j].cast::<L>() + self.pi[i] - self.pi[self.target[j]] >= L::zero()
@@ -278,18 +278,18 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     }
 
     #[inline]
-    fn is_open(&self, j: ArcId) -> bool {
+    fn is_open(&self, j: ArcIx) -> bool {
         self.res_cap[j] > V::zero() || self.uncapped[j]
     }
 
     /// Shortest path distances in the residual graph under the reduced
     /// original costs, from a virtual source joined to every node by a
     /// zero-length arc.
-    fn bellman_ford(&self) -> IdVec<NodeId, L> {
+    fn bellman_ford(&self) -> IdVec<NodeIx, L> {
         let n = self.res_node_num;
         let mut dist = IdVec::filled(n, L::zero());
         let mut mask = IdVec::filled(n, true);
-        let mut process: Vec<NodeId> = first_ids(n).collect();
+        let mut process: Vec<NodeIx> = first_ids(n).collect();
         let mut next = Vec::new();
         for _ in 0..n.saturating_sub(1) {
             for &u in &process {
@@ -335,7 +335,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let mut next_out = self.next_out.as_mut();
         let active_nodes = &mut self.active_nodes;
         let res_node_num = self.res_node_num;
-        for u in first_ids::<NodeId>(res_node_num) {
+        for u in first_ids::<NodeIx>(res_node_num) {
             let pi_u = pi[u];
             for a in ids(first_out[u]..first_out[u.next()]) {
                 let delta = res_cap[a];
@@ -351,8 +351,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             }
         }
 
-        active_nodes.extend(first_ids::<NodeId>(res_node_num).filter(|&u| excess[u] > V::zero()));
-        next_out.copy_from_slice(&first_out[..NodeId::new(res_node_num)]);
+        active_nodes.extend(first_ids::<NodeIx>(res_node_num).filter(|&u| excess[u] > V::zero()));
+        next_out.copy_from_slice(&first_out[..NodeIx::new(res_node_num)]);
     }
 
     /// Number of relabels between global updates. Counted in 64 bits: the

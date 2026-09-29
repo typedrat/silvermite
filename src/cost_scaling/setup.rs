@@ -4,7 +4,7 @@ use itertools::izip;
 
 use super::CostScaling;
 use crate::circulation::{Layout, circulation};
-use crate::ivec::{ArcId, IdVec, Idx, Link, NodeId, first_ids};
+use crate::ivec::{ArcIx, IdVec, Idx, Link, NodeIx, first_ids};
 use crate::{Error, Number, Problem, SupplyType};
 
 impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
@@ -19,7 +19,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.node_num = n;
         self.res_node_num = n + 1;
         self.res_arc_num = 2 * (m + n);
-        let root = NodeId::new(n);
+        let root = NodeIx::new(n);
         self.root = root;
         let res_node_num = self.res_node_num;
         let res_arc_num = self.res_arc_num;
@@ -33,11 +33,11 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             (&p.source, &p.target)
         };
 
-        self.first_out.reset(res_node_num + 1, ArcId::default());
+        self.first_out.reset(res_node_num + 1, ArcIx::default());
         self.forward.reset(res_arc_num, false);
-        self.source.reset(res_arc_num, NodeId::default());
-        self.target.reset(res_arc_num, NodeId::default());
-        self.reverse.reset(res_arc_num, ArcId::default());
+        self.source.reset(res_arc_num, NodeIx::default());
+        self.target.reset(res_arc_num, NodeIx::default());
+        self.reverse.reset(res_arc_num, ArcIx::default());
         self.lower.reset(res_arc_num, V::zero());
         self.upper.reset(res_arc_num, V::max_value());
         self.scost.reset(res_arc_num, C::zero());
@@ -47,18 +47,18 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.cost.reset(res_arc_num, L::zero());
         self.pi.reset(res_node_num, L::zero());
         self.excess.reset(res_node_num, V::zero());
-        self.next_out.reset(res_node_num, ArcId::default());
+        self.next_out.reset(res_node_num, ArcIx::default());
 
         // Block sizes, then block starts. `out_pos` and `in_pos` track the
         // next free forward and backward slot in each block.
-        let mut outs = IdVec::<NodeId, usize>::filled(n, 0);
-        let mut ins = IdVec::<NodeId, usize>::filled(n, 0);
+        let mut outs = IdVec::<NodeIx, usize>::filled(n, 0);
+        let mut ins = IdVec::<NodeIx, usize>::filled(n, 0);
         for (&s, &t) in src.iter().zip(tgt) {
             outs[s] += 1;
             ins[t] += 1;
         }
-        let mut out_pos = IdVec::<NodeId, ArcId>::filled(n, ArcId::default());
-        let mut in_pos = IdVec::<NodeId, ArcId>::filled(n, ArcId::default());
+        let mut out_pos = IdVec::<NodeIx, ArcIx>::filled(n, ArcIx::default());
+        let mut in_pos = IdVec::<NodeIx, ArcIx>::filled(n, ArcIx::default());
         let mut j = 0;
         for (first_out, out_pos, in_pos, &outs, &ins) in izip!(
             &mut *self.first_out,
@@ -67,13 +67,13 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             &*outs,
             &*ins,
         ) {
-            *first_out = ArcId::new(j);
-            *out_pos = ArcId::new(j);
-            *in_pos = ArcId::new(j + outs);
+            *first_out = ArcIx::new(j);
+            *out_pos = ArcIx::new(j);
+            *in_pos = ArcIx::new(j + outs);
             j += outs + ins + 1;
         }
-        self.first_out[root] = ArcId::new(j);
-        self.first_out[root.next()] = ArcId::new(res_arc_num);
+        self.first_out[root] = ArcIx::new(j);
+        self.first_out[root.next()] = ArcIx::new(res_arc_num);
 
         self.arc_idf.clear();
         self.arc_idb.clear();
@@ -98,7 +98,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             self.scost[b] = -cost;
         }
 
-        for (i, k) in first_ids::<NodeId>(n).zip(self.block(root)) {
+        for (i, k) in first_ids::<NodeIx>(n).zip(self.block(root)) {
             let j = self.first_out[i.next()].prev();
             self.source[j] = i;
             self.target[j] = root;
@@ -158,7 +158,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         // flow, so that bounds every infinite arc above its lower bound.
         let root_arcs = self.first_out[root];
         for (j, upper, &lower, &forward, uncapped) in izip!(
-            first_ids::<ArcId>(self.res_arc_num),
+            first_ids::<ArcIx>(self.res_arc_num),
             &mut *self.upper,
             &*self.lower,
             &*self.forward,
@@ -195,8 +195,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.epsilon = max_cost.unwrap_or(L::zero()).max(L::zero()) / L::from_i128(alpha as i128);
 
         // Find a feasible flow with lower bounds shifted to zero
-        let mut cap = IdVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
-        let mut sup = IdVec::<NodeId, V>::filled(n, V::zero());
+        let mut cap = IdVec::<ArcIx, V>::filled(self.res_arc_num, V::zero());
+        let mut sup = IdVec::<NodeIx, V>::filled(n, V::zero());
         sup.copy_from_slice(&self.supply[..root]);
         for &f in &self.arc_idf {
             let c = if self.has_lower {
@@ -210,7 +210,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         }
         self.sup_node_num = sup.iter().filter(|&&s| s > V::zero()).count();
 
-        let mut flow = IdVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
+        let mut flow = IdVec::<ArcIx, V>::filled(self.res_arc_num, V::zero());
         let layout = Layout {
             node_num: n,
             first_out: self.first_out.as_ref(),
@@ -261,7 +261,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.max_rank = alpha * res_node_num as u32;
         self.buckets.reset(self.max_rank as usize, Link::NONE);
         self.bucket_next.reset(res_node_num, Link::NONE);
-        self.bucket_prev.reset(res_node_num, NodeId::default());
+        self.bucket_prev.reset(res_node_num, NodeIx::default());
         self.rank.reset(res_node_num, 0);
 
         Ok(())

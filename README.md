@@ -38,10 +38,10 @@ assert_eq!(solution.total_cost(), 6 * 4 + 3 * 6 + 7);
 ```
 
 Flow and cost types can be any signed primitive integers. Nodes and arcs are
-`Node` and `Arc` handles, numbered densely from zero in insertion order, and
-upper bounds are a `Capacity`, which plain numbers convert into. Solver
-instances keep their buffers between calls to `solve`, so reuse one when
-solving many problems.
+identified by `NodeId` and `ArcId`, numbered densely from zero in insertion
+order, and upper bounds are a `Capacity`, which plain numbers convert into.
+Solver instances keep their buffers between calls to `solve`, so reuse one
+when solving many problems.
 
 The crate is plain safe Rust, `no_std` (it needs only `alloc`), and works on
 32-bit targets, including `wasm32-unknown-unknown`; the test suite passes on

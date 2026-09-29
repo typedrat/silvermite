@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::Number;
-use crate::ivec::{Idx, NodeId};
+use crate::ivec::{Idx, NodeIx};
 
 macro_rules! handle {
     ($(#[$attr:meta])* $name:ident) => {
@@ -30,15 +30,15 @@ macro_rules! handle {
 }
 
 handle!(
-    /// A node of a [`Problem`]. Nodes are numbered densely from zero in the
-    /// order they are added, so `Node::new(i)` is the `i`th node.
-    Node
+    /// Identifies a node of a [`Problem`]. Nodes are numbered densely from
+    /// zero in the order they are added, so `NodeId::new(i)` is the `i`th.
+    NodeId
 );
 
 handle!(
-    /// An arc of a [`Problem`]. Arcs are numbered densely from zero in the
-    /// order they are added, so `Arc::new(i)` is the `i`th arc.
-    Arc
+    /// Identifies an arc of a [`Problem`]. Arcs are numbered densely from
+    /// zero in the order they are added, so `ArcId::new(i)` is the `i`th.
+    ArcId
 );
 
 /// Upper bound on the flow along an arc.
@@ -104,13 +104,13 @@ pub enum SupplyType {
 ///
 /// # Panics
 ///
-/// Methods taking a [`Node`] or [`Arc`] panic if it is not part of the
+/// Methods taking a [`NodeId`] or [`ArcId`] panic if it is not part of the
 /// problem.
 #[derive(Clone, Debug, Default)]
 pub struct Problem<V, C> {
     pub(crate) supply: Vec<V>,
-    pub(crate) source: Vec<NodeId>,
-    pub(crate) target: Vec<NodeId>,
+    pub(crate) source: Vec<NodeIx>,
+    pub(crate) target: Vec<NodeIx>,
     pub(crate) lower: Vec<V>,
     // `V::max_value()` for infinite capacity
     pub(crate) upper: Vec<V>,
@@ -147,31 +147,31 @@ impl<V: Number, C: Number> Problem<V, C> {
     }
 
     /// Every node, in order.
-    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = Node> + ExactSizeIterator + use<V, C> {
-        (0..self.node_count()).map(Node::new)
+    pub fn nodes(&self) -> impl DoubleEndedIterator<Item = NodeId> + ExactSizeIterator + use<V, C> {
+        (0..self.node_count()).map(NodeId::new)
     }
 
     /// Every arc, in order.
-    pub fn arcs(&self) -> impl DoubleEndedIterator<Item = Arc> + ExactSizeIterator + use<V, C> {
-        (0..self.arc_count()).map(Arc::new)
+    pub fn arcs(&self) -> impl DoubleEndedIterator<Item = ArcId> + ExactSizeIterator + use<V, C> {
+        (0..self.arc_count()).map(ArcId::new)
     }
 
     /// Adds a node with the given supply (negative for demand).
-    pub fn add_node(&mut self, supply: V) -> Node {
+    pub fn add_node(&mut self, supply: V) -> NodeId {
         self.supply.push(supply);
-        Node::new(self.supply.len() - 1)
+        NodeId::new(self.supply.len() - 1)
     }
 
     /// Adds an arc from `source` to `target` whose flow must lie between
     /// `lower` and `upper`.
     pub fn add_arc(
         &mut self,
-        source: Node,
-        target: Node,
+        source: NodeId,
+        target: NodeId,
         lower: V,
         upper: impl Into<Capacity<V>>,
         cost: C,
-    ) -> Arc {
+    ) -> ArcId {
         let n = self.node_count();
         assert!(
             source.index() < n,
@@ -181,30 +181,30 @@ impl<V: Number, C: Number> Problem<V, C> {
             target.index() < n,
             "arc target {target} out of range (node count {n})"
         );
-        self.source.push(NodeId::new(source.index()));
-        self.target.push(NodeId::new(target.index()));
+        self.source.push(NodeIx::new(source.index()));
+        self.target.push(NodeIx::new(target.index()));
         self.lower.push(lower);
         self.upper.push(upper.into().to_raw());
         self.cost.push(cost);
-        Arc::new(self.source.len() - 1)
+        ArcId::new(self.source.len() - 1)
     }
 
-    pub fn supply(&self, node: Node) -> V {
+    pub fn supply(&self, node: NodeId) -> V {
         self.supply[node.index()]
     }
 
-    /// The supply of every node, indexed by [`Node::index`].
+    /// The supply of every node, indexed by [`NodeId::index`].
     pub fn supplies(&self) -> &[V] {
         &self.supply
     }
 
-    pub fn set_supply(&mut self, node: Node, supply: V) {
+    pub fn set_supply(&mut self, node: NodeId, supply: V) {
         self.supply[node.index()] = supply;
     }
 
     /// Replaces all supplies with a single `amount` sent from `source` to
     /// `target`.
-    pub fn set_st_supply(&mut self, source: Node, target: Node, amount: V) {
+    pub fn set_st_supply(&mut self, source: NodeId, target: NodeId, amount: V) {
         self.supply.fill(V::zero());
         self.supply[source.index()] = amount;
         self.supply[target.index()] = -amount;
@@ -218,32 +218,32 @@ impl<V: Number, C: Number> Problem<V, C> {
         self.supply_type = supply_type;
     }
 
-    pub fn source(&self, arc: Arc) -> Node {
-        Node::new(self.source[arc.index()].index())
+    pub fn source(&self, arc: ArcId) -> NodeId {
+        NodeId::new(self.source[arc.index()].index())
     }
 
-    pub fn target(&self, arc: Arc) -> Node {
-        Node::new(self.target[arc.index()].index())
+    pub fn target(&self, arc: ArcId) -> NodeId {
+        NodeId::new(self.target[arc.index()].index())
     }
 
-    pub fn lower(&self, arc: Arc) -> V {
+    pub fn lower(&self, arc: ArcId) -> V {
         self.lower[arc.index()]
     }
 
-    pub fn upper(&self, arc: Arc) -> Capacity<V> {
+    pub fn upper(&self, arc: ArcId) -> Capacity<V> {
         Capacity::from_raw(self.upper[arc.index()])
     }
 
-    pub fn cost(&self, arc: Arc) -> C {
+    pub fn cost(&self, arc: ArcId) -> C {
         self.cost[arc.index()]
     }
 
-    pub fn set_bounds(&mut self, arc: Arc, lower: V, upper: impl Into<Capacity<V>>) {
+    pub fn set_bounds(&mut self, arc: ArcId, lower: V, upper: impl Into<Capacity<V>>) {
         self.lower[arc.index()] = lower;
         self.upper[arc.index()] = upper.into().to_raw();
     }
 
-    pub fn set_cost(&mut self, arc: Arc, cost: C) {
+    pub fn set_cost(&mut self, arc: ArcId, cost: C) {
         self.cost[arc.index()] = cost;
     }
 
@@ -263,7 +263,9 @@ impl<V: Number, C: Number> Problem<V, C> {
             .zip(&self.upper)
             .position(|(lower, upper)| upper < lower)
         {
-            return Err(Error::InvalidBounds { arc: Arc::new(arc) });
+            return Err(Error::InvalidBounds {
+                arc: ArcId::new(arc),
+            });
         }
         Ok(())
     }
@@ -286,20 +288,20 @@ pub struct Solution<V, C> {
 }
 
 impl<V: Number, C: Number> Solution<V, C> {
-    pub fn flow(&self, arc: Arc) -> V {
+    pub fn flow(&self, arc: ArcId) -> V {
         self.flow[arc.index()]
     }
 
-    /// Flow on every arc, indexed by [`Arc::index`].
+    /// Flow on every arc, indexed by [`ArcId::index`].
     pub fn flows(&self) -> &[V] {
         &self.flow
     }
 
-    pub fn potential(&self, node: Node) -> C {
+    pub fn potential(&self, node: NodeId) -> C {
         self.potential[node.index()]
     }
 
-    /// Potential of every node, indexed by [`Node::index`].
+    /// Potential of every node, indexed by [`NodeId::index`].
     ///
     /// With `pi` as the potentials, every arc `(u, v)` satisfies complementary
     /// slackness for the reduced cost `cost + pi[u] - pi[v]`: arcs with
@@ -338,7 +340,7 @@ pub enum Error {
     Unbounded,
     /// The arc's lower bound exceeds its upper bound.
     #[error("arc {arc} has a lower bound greater than its upper bound")]
-    InvalidBounds { arc: Arc },
+    InvalidBounds { arc: ArcId },
     /// The problem has more nodes or arcs than the solvers can index.
     #[error("the problem has too many nodes or arcs")]
     TooLarge,

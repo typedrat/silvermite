@@ -5,19 +5,19 @@ use itertools::izip;
 
 use super::CostScaling;
 use crate::Number;
-use crate::ivec::{IMut, Link, NodeId, first_ids, ids};
+use crate::ivec::{IMut, Link, NodeIx, first_ids, ids};
 
 /// Doubly linked lists of nodes by rank; `first[r]` heads the list of rank
 /// `r`. A list head's `prev` entry is stale and never read.
 pub(super) struct Buckets<'a> {
-    pub(super) first: IMut<'a, usize, Link<NodeId>>,
-    pub(super) next: IMut<'a, NodeId, Link<NodeId>>,
-    pub(super) prev: IMut<'a, NodeId, NodeId>,
+    pub(super) first: IMut<'a, usize, Link<NodeIx>>,
+    pub(super) next: IMut<'a, NodeIx, Link<NodeIx>>,
+    pub(super) prev: IMut<'a, NodeIx, NodeIx>,
 }
 
 impl Buckets<'_> {
     #[inline(always)]
-    pub(super) fn unlink(&mut self, v: NodeId, r: u32) {
+    pub(super) fn unlink(&mut self, v: NodeIx, r: u32) {
         let next = self.next[v];
         let first = &mut self.first[r as usize];
         if *first == Link::to(v) {
@@ -32,7 +32,7 @@ impl Buckets<'_> {
     }
 
     #[inline(always)]
-    pub(super) fn link(&mut self, v: NodeId, r: u32) {
+    pub(super) fn link(&mut self, v: NodeIx, r: u32) {
         let first = &mut self.first[r as usize];
         let head = *first;
         *first = Link::to(v);
@@ -44,7 +44,7 @@ impl Buckets<'_> {
 
     /// Removes and returns the head of the list of rank `r`.
     #[inline(always)]
-    pub(super) fn pop(&mut self, r: u32) -> Option<NodeId> {
+    pub(super) fn pop(&mut self, r: u32) -> Option<NodeIx> {
         let first = &mut self.first[r as usize];
         let head = first.get()?;
         *first = self.next[head];
@@ -77,7 +77,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 
         buckets.first.fill(Link::NONE);
         let mut total_excess = V::zero();
-        for i in first_ids::<NodeId>(res_node_num) {
+        for i in first_ids::<NodeIx>(res_node_num) {
             if excess[i] < V::zero() {
                 rank[i] = 0;
                 buckets.link(i, 0);

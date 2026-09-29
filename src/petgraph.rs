@@ -38,7 +38,7 @@ use nonmax::NonMaxU32;
 use petgraph::Directed;
 use petgraph::visit::{EdgeRef, GraphProp, IntoEdgeReferences, IntoNodeIdentifiers, NodeIndexable};
 
-use crate::{Arc, Capacity, Node, Number, Problem, Solution};
+use crate::{ArcId, Capacity, NodeId, Number, Problem, Solution};
 
 /// Bounds and cost of one arc.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,12 +58,12 @@ pub struct IdMap<N, E> {
 
 impl<N: Copy, E: Copy> IdMap<N, E> {
     /// The graph node behind problem node `node`.
-    pub fn node_id(&self, node: Node) -> N {
+    pub fn graph_node(&self, node: NodeId) -> N {
         self.nodes[node.index()]
     }
 
     /// The graph edge behind problem arc `arc`.
-    pub fn edge_id(&self, arc: Arc) -> E {
+    pub fn graph_edge(&self, arc: ArcId) -> E {
         self.edges[arc.index()]
     }
 
@@ -116,7 +116,7 @@ where
     }
     let dense_index = |n| {
         let i = dense[graph.to_index(n)].expect("edge endpoints are graph nodes");
-        Node::new(i.get() as usize)
+        NodeId::new(i.get() as usize)
     };
 
     let mut edges = Vec::new();

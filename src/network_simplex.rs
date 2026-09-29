@@ -12,7 +12,7 @@ use std::ops::{ControlFlow, Range};
 
 use itertools::izip;
 
-use crate::ivec::{ArcId, IRef, IVec, Idx, NodeId, first_ids};
+use crate::ivec::{ArcId, IRef, IVec, IdVec, Idx, NodeId, first_ids};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
 /// Strategy for choosing the entering arc in each simplex iteration.
@@ -793,7 +793,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 // Reverse DFS from the sink to the source over arcs that can
                 // carry the whole amount. The incoming arcs of `v` are
                 // `in_arcs[in_first[v]..in_first[v.next()]]`.
-                let mut in_first = IVec::<NodeId, usize>::filled(n + 1, 0);
+                let mut in_first = IdVec::<NodeId, usize>::filled(n + 1, 0);
                 for &t in &self.target[arcs] {
                     in_first[t.next()] += 1;
                 }
@@ -809,7 +809,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                     fill[t] += 1;
                 }
 
-                let mut reached = IVec::<NodeId, bool>::filled(n, false);
+                let mut reached = IdVec::<NodeId, bool>::filled(n, false);
                 let mut stack = vec![*t];
                 reached[*t] = true;
                 while let Some(v) = stack.pop() {
@@ -847,9 +847,9 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
 
     /// For each node, the cheapest original arc with that node as its
     /// endpoint in `endpoints`.
-    fn cheapest_arcs(&self, endpoints: &[NodeId]) -> IVec<NodeId, Option<ArcId>> {
-        let mut best = IVec::filled(self.node_num, None);
-        let mut best_cost = IVec::filled(self.node_num, C::max_value());
+    fn cheapest_arcs(&self, endpoints: &[NodeId]) -> IdVec<NodeId, Option<ArcId>> {
+        let mut best = IdVec::filled(self.node_num, None);
+        let mut best_cost = IdVec::filled(self.node_num, C::max_value());
         for (j, &v, &c) in izip!(first_ids::<ArcId>(endpoints.len()), endpoints, &*self.cost) {
             if best[v].is_none() || c < best_cost[v] {
                 best[v] = Some(j);

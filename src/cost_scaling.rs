@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use itertools::izip;
 
 use crate::circulation::{Layout, circulation};
-use crate::ivec::{ArcId, IMut, IVec, Idx, Link, NodeId, first_ids, ids};
+use crate::ivec::{ArcId, IMut, IVec, IdVec, Idx, Link, NodeId, first_ids, ids};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
 /// The flow-moving operation used alongside relabeling.
@@ -257,14 +257,14 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
 
         // Block sizes, then block starts. `out_pos` and `in_pos` track the
         // next free forward and backward slot in each block.
-        let mut outs = IVec::<NodeId, usize>::filled(n, 0);
-        let mut ins = IVec::<NodeId, usize>::filled(n, 0);
+        let mut outs = IdVec::<NodeId, usize>::filled(n, 0);
+        let mut ins = IdVec::<NodeId, usize>::filled(n, 0);
         for (&s, &t) in src.iter().zip(tgt) {
             outs[s] += 1;
             ins[t] += 1;
         }
-        let mut out_pos = IVec::<NodeId, ArcId>::filled(n, ArcId::default());
-        let mut in_pos = IVec::<NodeId, ArcId>::filled(n, ArcId::default());
+        let mut out_pos = IdVec::<NodeId, ArcId>::filled(n, ArcId::default());
+        let mut in_pos = IdVec::<NodeId, ArcId>::filled(n, ArcId::default());
         let mut j = 0;
         for (first_out, out_pos, in_pos, &outs, &ins) in izip!(
             &mut *self.first_out,
@@ -399,8 +399,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         self.epsilon = max_cost.unwrap_or(L::zero()).max(L::zero()) / L::from_i128(alpha as i128);
 
         // Find a feasible flow with lower bounds shifted to zero
-        let mut cap = IVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
-        let mut sup = IVec::<NodeId, V>::filled(n, V::zero());
+        let mut cap = IdVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
+        let mut sup = IdVec::<NodeId, V>::filled(n, V::zero());
         sup.copy_from_slice(&self.supply[..root]);
         for &f in &self.arc_idf {
             let c = if self.has_lower {
@@ -414,7 +414,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         }
         self.sup_node_num = sup.iter().filter(|&&s| s > V::zero()).count();
 
-        let mut flow = IVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
+        let mut flow = IdVec::<ArcId, V>::filled(self.res_arc_num, V::zero());
         let layout = Layout {
             node_num: n,
             first_out: self.first_out.as_ref(),
@@ -537,10 +537,10 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
     /// Shortest path distances in the residual graph under the reduced
     /// original costs, from a virtual source joined to every node by a
     /// zero-length arc.
-    fn bellman_ford(&self) -> IVec<NodeId, L> {
+    fn bellman_ford(&self) -> IdVec<NodeId, L> {
         let n = self.res_node_num;
-        let mut dist = IVec::filled(n, L::zero());
-        let mut mask = IVec::filled(n, true);
+        let mut dist = IdVec::filled(n, L::zero());
+        let mut mask = IdVec::filled(n, true);
         let mut process: Vec<NodeId> = first_ids(n).collect();
         let mut next = Vec::new();
         for _ in 0..n.saturating_sub(1) {
@@ -732,12 +732,12 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         const MAX_CYCLE_CANCEL: usize = 1;
 
         let n = self.res_node_num;
-        let mut reached = IVec::<NodeId, bool>::filled(n, false);
-        let mut processed = IVec::<NodeId, bool>::filled(n, false);
-        let mut pred = IVec::<NodeId, Link<NodeId>>::filled(n, Link::NONE);
+        let mut reached = IdVec::<NodeId, bool>::filled(n, false);
+        let mut processed = IdVec::<NodeId, bool>::filled(n, false);
+        let mut pred = IdVec::<NodeId, Link<NodeId>>::filled(n, Link::NONE);
         next_out.copy_from_slice(&first_out[..NodeId::new(n)]);
         order.clear();
-        let pred_of = |pred: &IVec<NodeId, Link<NodeId>>, u: NodeId| {
+        let pred_of = |pred: &IdVec<NodeId, Link<NodeId>>, u: NodeId| {
             pred[u].get().expect("DFS tree nodes have a pred")
         };
 
@@ -957,7 +957,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         let mut next_global_update_limit = global_update_skip;
 
         let mut path: Vec<ArcId> = Vec::new();
-        let mut path_arc = IVec::filled(self.res_arc_num, false);
+        let mut path_arc = IdVec::filled(self.res_arc_num, false);
         let mut relabel_cnt = 0u64;
         let mut eps_phase_cnt = 0usize;
         while self.epsilon >= L::one() {
@@ -992,7 +992,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         &mut self,
         max_length: usize,
         path: &mut Vec<ArcId>,
-        path_arc: &mut IVec<ArcId, bool>,
+        path_arc: &mut IdVec<ArcId, bool>,
         relabel_cnt: &mut u64,
         relabel_limit: u64,
     ) -> bool {
@@ -1104,8 +1104,8 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
         // A "hyper" node received only part of a push because it could not
         // pass the whole amount on; it is processed next and relabeled even
         // without excess.
-        let mut hyper = IVec::<NodeId, bool>::filled(self.res_node_num, false);
-        let mut hyper_cost = IVec::<NodeId, L>::filled(self.res_node_num, L::zero());
+        let mut hyper = IdVec::<NodeId, bool>::filled(self.res_node_num, false);
+        let mut hyper_cost = IdVec::<NodeId, L>::filled(self.res_node_num, L::zero());
         let mut relabel_cnt = 0u64;
         let mut eps_phase_cnt = 0usize;
         while self.epsilon >= L::one() {

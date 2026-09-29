@@ -5,7 +5,7 @@
 //! arc block lists its outgoing arcs (forward), then its incoming arcs
 //! (backward), then one arc to the artificial root.
 
-use crate::ivec::{ArcId, IMut, IRef, IVec, Idx, NodeId, first_ids, ids};
+use crate::ivec::{ArcId, IMut, IRef, IdVec, Idx, NodeId, first_ids, ids};
 use crate::{Error, Number};
 
 /// The residual graph layout the circulation reads, restricted to the real
@@ -32,7 +32,7 @@ pub(crate) fn circulation<V: Number>(
     mut flow: IMut<'_, ArcId, V>,
 ) -> Result<(), Error> {
     let n = g.node_num;
-    let mut excess = IVec::<NodeId, V>::filled(n, V::zero());
+    let mut excess = IdVec::<NodeId, V>::filled(n, V::zero());
     excess.copy_from_slice(&supply[..NodeId::new(n)]);
 
     // Greedy initialization: send as much as the target still demands.
@@ -161,8 +161,8 @@ pub(crate) fn circulation<V: Number>(
 struct Elevator {
     max_level: usize,
     items: Vec<NodeId>,
-    where_: IVec<NodeId, usize>,
-    level: IVec<NodeId, usize>,
+    where_: IdVec<NodeId, usize>,
+    level: IdVec<NodeId, usize>,
     first: Vec<usize>,
     active_end: Vec<usize>,
     highest_active: Option<usize>,
@@ -175,15 +175,11 @@ impl Elevator {
         // Everything is on level 0, so every higher level starts at the end.
         let mut first = vec![item_num; item_num + 2];
         first[0] = 0;
-        let mut where_ = IVec::filled(item_num, 0);
-        for (w, i) in where_.iter_mut().zip(0..) {
-            *w = i;
-        }
         Elevator {
             max_level: item_num,
             items: first_ids(item_num).collect(),
-            where_,
-            level: IVec::filled(item_num, 0),
+            where_: (0..item_num).collect(),
+            level: IdVec::filled(item_num, 0),
             active_end: first.clone(),
             first,
             highest_active: None,

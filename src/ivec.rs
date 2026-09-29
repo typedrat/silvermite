@@ -186,13 +186,6 @@ impl<I, T> IVec<I, T> {
 }
 
 impl<I, T: Clone> IVec<I, T> {
-    /// An unstaggered array of `len` copies of `value`, for temporaries.
-    pub(crate) fn filled(len: usize, value: T) -> Self {
-        let mut v = Self::slot(0);
-        v.reset(len, value);
-        v
-    }
-
     /// Resizes to `len` and overwrites every element with `value`.
     pub(crate) fn reset(&mut self, len: usize, value: T) {
         let per_line = (CACHE_LINE / size_of::<T>().max(1)).max(1);
@@ -229,6 +222,66 @@ impl<I, T> Deref for IVec<I, T> {
 impl<I, T> DerefMut for IVec<I, T> {
     fn deref_mut(&mut self) -> &mut [T] {
         &mut self.buf[self.off..]
+    }
+}
+
+/// A plain `Vec` indexed by `I`, for scratch arrays.
+///
+/// Unlike [`IVec`], indexing it adds no stagger offset, so it suits arrays
+/// indexed directly in hot loops rather than through a view.
+#[derive(Clone, Debug)]
+pub(crate) struct IdVec<I, T>(Vec<T>, PhantomData<I>);
+
+impl<I, T: Clone> IdVec<I, T> {
+    /// `len` copies of `value`.
+    pub(crate) fn filled(len: usize, value: T) -> Self {
+        IdVec(vec![value; len], PhantomData)
+    }
+}
+
+impl<I, T> IdVec<I, T> {
+    pub(crate) fn as_mut(&mut self) -> IMut<'_, I, T> {
+        IMut::new(&mut self.0)
+    }
+
+    pub(crate) fn as_ref(&self) -> IRef<'_, I, T> {
+        IRef::new(&self.0)
+    }
+}
+
+impl<I, T> FromIterator<T> for IdVec<I, T> {
+    fn from_iter<It: IntoIterator<Item = T>>(iter: It) -> Self {
+        IdVec(iter.into_iter().collect(), PhantomData)
+    }
+}
+
+impl<I: Idx, T> Index<I> for IdVec<I, T> {
+    type Output = T;
+
+    #[inline(always)]
+    fn index(&self, i: I) -> &T {
+        &self.0[i.index()]
+    }
+}
+
+impl<I: Idx, T> IndexMut<I> for IdVec<I, T> {
+    #[inline(always)]
+    fn index_mut(&mut self, i: I) -> &mut T {
+        &mut self.0[i.index()]
+    }
+}
+
+impl<I, T> Deref for IdVec<I, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<I, T> DerefMut for IdVec<I, T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.0
     }
 }
 
@@ -328,6 +381,22 @@ macro_rules! index_ranges {
             #[inline(always)]
             fn index_mut(&mut self, r: $range<I>) -> &mut [T] {
                 &mut (**self)[r.to_positions()]
+            }
+        }
+
+        impl<I: Idx, T> Index<$range<I>> for IdVec<I, T> {
+            type Output = [T];
+
+            #[inline(always)]
+            fn index(&self, r: $range<I>) -> &[T] {
+                &self.0[r.to_positions()]
+            }
+        }
+
+        impl<I: Idx, T> IndexMut<$range<I>> for IdVec<I, T> {
+            #[inline(always)]
+            fn index_mut(&mut self, r: $range<I>) -> &mut [T] {
+                &mut self.0[r.to_positions()]
             }
         }
 

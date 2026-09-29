@@ -4,6 +4,7 @@
 mod common;
 
 use common::{Rng, Solver, check_solution};
+use silvermite::{ArcId, CostScaling};
 use silvermite::{Capacity, Error, NetworkSimplex, NodeId, Number, PivotRule, Problem, SupplyType};
 
 /// A small random instance mixing lower bounds (some negative), infinite
@@ -228,4 +229,111 @@ fn warm_start_from_unique_optimum() {
     let optimum = [3, 3, 2, 2];
     let solution = NetworkSimplex::new().solve_from(&p, &optimum).unwrap();
     assert_eq!(solution.flows(), &optimum);
+}
+
+/// Applies a few random edits of the kinds `resolve` supports: costs,
+/// bounds, supplies, supply type, and added nodes and arcs.
+fn edit<T: Number>(rng: &mut Rng, p: &mut Problem<T, T>) {
+    let t = |x: i64| T::from_i128(x as i128);
+    for _ in 0..rng.range(1, 4) {
+        let arc = |rng: &mut Rng| ArcId::new(rng.range(0, p.arc_count() as i64 - 1) as usize);
+        match rng.range(0, 5) {
+            0 if p.arc_count() > 0 => {
+                let a = arc(rng);
+                p.set_cost(a, t(rng.range(-10, 30)));
+            }
+            1 if p.arc_count() > 0 => {
+                let a = arc(rng);
+                let lower = rng.range(-3, 5);
+                let upper = if rng.chance(0.2) {
+                    Capacity::Infinite
+                } else {
+                    Capacity::Finite(t(lower + rng.range(0, 20)))
+                };
+                p.set_bounds(a, t(lower), upper);
+            }
+            2 => {
+                let u = NodeId::new(rng.range(0, p.node_count() as i64 - 1) as usize);
+                let v = NodeId::new(rng.range(0, p.node_count() as i64 - 1) as usize);
+                let amount = t(rng.range(1, 5));
+                p.set_supply(u, p.supply(u) + amount);
+                p.set_supply(v, p.supply(v) - amount);
+            }
+            3 => {
+                let flipped = match p.supply_type() {
+                    SupplyType::Geq => SupplyType::Leq,
+                    SupplyType::Leq => SupplyType::Geq,
+                };
+                p.set_supply_type(flipped);
+            }
+            _ => {
+                let v = p.add_node(T::zero());
+                let u = NodeId::new(rng.range(0, p.node_count() as i64 - 2) as usize);
+                p.add_arc(u, v, T::zero(), t(rng.range(0, 10)), t(rng.range(0, 20)));
+                p.add_arc(v, u, T::zero(), Capacity::Infinite, t(rng.range(0, 20)));
+            }
+        }
+    }
+}
+
+fn resolve_check<T: Number>(seed: u64, count: usize) {
+    let mut rng = Rng::new(seed);
+    let rules = [
+        PivotRule::FirstEligible,
+        PivotRule::BestEligible,
+        PivotRule::BlockSearch,
+        PivotRule::CandidateList,
+        PivotRule::AlteringList,
+    ];
+    let mut resolved = 0;
+    for case in 0..count {
+        let (mut p, _) = random_problem::<T>(&mut rng, false);
+        let Ok(before) = NetworkSimplex::new().solve(&p) else {
+            continue;
+        };
+        let scaled = CostScaling::<T, T>::new().solve(&p).unwrap();
+        // A chain of edits, each resolved from the previous solution.
+        let mut previous = [before, scaled];
+        for step in 0..3 {
+            edit(&mut rng, &mut p);
+            let reference = outcome(&NetworkSimplex::new().solve(&p));
+            for (k, prev) in previous.clone().iter().enumerate() {
+                for rule in rules {
+                    for mixing in [true, false] {
+                        let mut solver = NetworkSimplex::new().pivot_rule(rule).arc_mixing(mixing);
+                        let result = solver.resolve(&p, prev);
+                        let context = || {
+                            format!(
+                                "seed {seed} case {case} step {step} from {k} {rule:?} mixing {mixing}"
+                            )
+                        };
+                        if let Ok(s) = &result {
+                            check_solution(&p, s)
+                                .unwrap_or_else(|e| panic!("{}: {e}\n{p:?}", context()));
+                        }
+                        assert_eq!(outcome(&result), reference, "{}\n{p:?}", context());
+                        if let Ok(s) = result
+                            && rule == PivotRule::BlockSearch
+                            && mixing
+                        {
+                            previous[k] = s;
+                        }
+                    }
+                }
+            }
+            resolved += reference.is_ok() as usize;
+        }
+    }
+    eprintln!("seed {seed}: {resolved} feasible resolves");
+    assert!(resolved > count / 2, "only {resolved} feasible resolves");
+}
+
+#[test]
+fn resolve_i64() {
+    resolve_check::<i64>(7, 3000);
+}
+
+#[test]
+fn resolve_i32() {
+    resolve_check::<i32>(8, 1000);
 }

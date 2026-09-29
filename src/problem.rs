@@ -4,6 +4,7 @@ use core::fmt;
 
 use crate::Number;
 use crate::ivec::{Idx, NodeIx};
+use crate::network_simplex::Basis;
 
 macro_rules! handle {
     ($(#[$attr:meta])* $name:ident) => {
@@ -280,12 +281,28 @@ impl<V: Number, C: Number> Problem<V, C> {
 }
 
 /// An optimal flow together with optimal node potentials (dual solution).
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Solutions compare equal when their flows, potentials, and costs do.
+#[derive(Clone, Debug)]
 pub struct Solution<V, C> {
     pub(crate) flow: Vec<V>,
     pub(crate) potential: Vec<C>,
     pub(crate) total_cost: i128,
+    /// Where network simplex ended, for [`NetworkSimplex::resolve`].
+    ///
+    /// [`NetworkSimplex::resolve`]: crate::NetworkSimplex::resolve
+    pub(crate) basis: Option<Basis>,
 }
+
+impl<V: PartialEq, C: PartialEq> PartialEq for Solution<V, C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.flow == other.flow
+            && self.potential == other.potential
+            && self.total_cost == other.total_cost
+    }
+}
+
+impl<V: Eq, C: Eq> Eq for Solution<V, C> {}
 
 impl<V: Number, C: Number> Solution<V, C> {
     pub fn flow(&self, arc: ArcId) -> V {

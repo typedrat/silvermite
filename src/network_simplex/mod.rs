@@ -16,11 +16,14 @@ use self::pivot_rules::{
 use crate::ivec::{ArcIx, IVec, Idx, NodeIx};
 use crate::{Error, Number, Problem, Solution, SupplyType};
 
-mod from_flow;
+mod initial_pivots;
 mod pivot_rules;
 mod setup;
 mod tree;
 mod warm_start;
+
+pub(crate) use warm_start::Basis;
+use warm_start::Start;
 
 /// Strategy for choosing the entering arc in each simplex iteration.
 ///
@@ -262,13 +265,61 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             problem.arc_count(),
             "initial flow length does not match the arc count"
         );
-        self.run(problem, Some(flow))
+        self.run(problem, Some(Start::Flow(flow)))
+    }
+
+    /// Solves `problem` starting from where `previous`, a solution to an
+    /// earlier version of it, left off.
+    ///
+    /// Meant for problems edited between solves: changed costs, bounds,
+    /// supplies, or supply type, and nodes and arcs added since. A network
+    /// simplex solution remembers the spanning tree it ended with, and
+    /// restarting from that tree rather than from the flow alone makes a
+    /// small edit take only a few pivots. A solution from
+    /// [`CostScaling`](crate::CostScaling) has no tree, so only its flow is
+    /// used, as with [`solve_from`](Self::solve_from), with added arcs
+    /// starting empty.
+    ///
+    /// The result is optimal whatever `previous` is, even a solution to an
+    /// unrelated problem.
+    ///
+    /// ```
+    /// use silvermite::{NetworkSimplex, Problem};
+    ///
+    /// let mut p = Problem::<i64, i64>::new(0);
+    /// let [s, a, t] = [5, 0, -5].map(|supply| p.add_node(supply));
+    /// p.add_arc(s, a, 0, 5, 1);
+    /// p.add_arc(a, t, 0, 5, 1);
+    /// let direct = p.add_arc(s, t, 0, 5, 3);
+    ///
+    /// let mut solver = NetworkSimplex::new();
+    /// let first = solver.solve(&p).unwrap();
+    /// assert_eq!(first.flow(direct), 0);
+    ///
+    /// // The direct route gets cheaper.
+    /// p.set_cost(direct, 1);
+    /// let second = solver.resolve(&p, &first).unwrap();
+    /// assert_eq!(second.flow(direct), 5);
+    /// ```
+    pub fn resolve(
+        &mut self,
+        problem: &Problem<V, C>,
+        previous: &Solution<V, C>,
+    ) -> Result<Solution<V, C>, Error> {
+        match &previous.basis {
+            Some(basis) => self.run(problem, Some(Start::Basis(basis))),
+            None => {
+                let mut flow = previous.flow.clone();
+                flow.resize(problem.arc_count(), V::zero());
+                self.run(problem, Some(Start::Flow(&flow)))
+            }
+        }
     }
 
     fn run(
         &mut self,
         problem: &Problem<V, C>,
-        guess: Option<&[V]>,
+        warm: Option<Start<'_, V>>,
     ) -> Result<Solution<V, C>, Error> {
         problem.validate(2)?;
         let n = problem.node_count();
@@ -277,16 +328,17 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
                 flow: Vec::new(),
                 potential: Vec::new(),
                 total_cost: 0,
+                basis: None,
             });
         }
 
         self.load(problem);
-        match guess {
+        match warm {
             None => {
                 self.init()?;
                 self.initial_pivots()?;
             }
-            Some(guess) => self.init_from_flow(guess)?,
+            Some(start) => self.init_warm(start)?,
         }
         match self.pivot_rule {
             PivotRule::FirstEligible => self.start::<FirstEligible>()?,
@@ -303,6 +355,7 @@ impl<V: Number, C: Number> NetworkSimplex<V, C> {
             flow,
             potential,
             total_cost,
+            basis: Some(self.basis()),
         })
     }
 

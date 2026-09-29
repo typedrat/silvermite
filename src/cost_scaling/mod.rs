@@ -193,6 +193,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
                 flow: Vec::new(),
                 potential: Vec::new(),
                 total_cost: 0,
+                basis: None,
             });
         }
         if (n as u64 + 1) * self.alpha as u64 >= u32::MAX as u64 {
@@ -216,6 +217,7 @@ impl<V: Number, C: Number, L: Number> CostScaling<V, C, L> {
             flow,
             potential,
             total_cost,
+            basis: None,
         })
     }
 

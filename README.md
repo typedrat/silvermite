@@ -43,11 +43,18 @@ order, and upper bounds are a `Capacity`, which plain numbers convert into.
 Solver instances keep their buffers between calls to `solve`, so reuse one
 when solving many problems.
 
-`NetworkSimplex::solve_from` takes a guess at the flow, such as a greedy
-heuristic's answer or the solution to a similar earlier problem, and starts
-pivoting from it rather than from scratch. The guess need not be feasible;
-the result is optimal either way. A guess near the optimum cuts the pivot
-count sharply, but a poor one saves little, so measure before relying on it.
+Network simplex can also start from somewhere other than scratch, and the
+result is optimal either way:
+
+- `NetworkSimplex::resolve` re-solves a problem edited since an earlier
+  solve (costs, bounds, supplies, or supply type changed, or nodes and arcs
+  added), starting from the spanning tree that solve ended with. A small
+  edit typically takes a handful of pivots where solving from scratch takes
+  thousands.
+- `NetworkSimplex::solve_from` takes a guess at the flow, such as a greedy
+  heuristic's answer. The guess need not be feasible. A guess near the
+  optimum cuts the pivot count sharply, but a poor one saves little, so
+  measure before relying on it.
 
 The crate is plain safe Rust, `no_std` (it needs only `alloc`), and works on
 32-bit targets, including `wasm32-unknown-unknown`; the test suite passes on
@@ -77,8 +84,8 @@ relabel steps, with these exceptions:
      array, which is an out-of-bounds write in C++ (reproducible with
      `-D_GLIBCXX_ASSERTIONS` and `Method::Augment`).
 - `CostScaling` supports `SupplyType::Leq` by solving the mirrored problem.
-- `NetworkSimplex` can start from a caller's flow (`solve_from`), which
-  LEMON has no entry point for.
+- `NetworkSimplex` can warm-start from an earlier solve (`resolve`) or a
+  caller's flow (`solve_from`), which LEMON has no entry point for.
 - An empty problem is solved (to an empty flow) instead of being reported
   infeasible.
 - Inputs are validated: inconsistent bounds return `Error::InvalidBounds`,
@@ -97,7 +104,8 @@ relabel steps, with these exceptions:
   self-loops, and all supply regimes, verifying every optimal solution's
   primal feasibility, complementary slackness, and dual objective. It also
   warm-starts every pivot rule on 1,600 of them from the optimum, a perturbed
-  optimum, zero flow, and random out-of-bounds flows.
+  optimum, zero flow, and random out-of-bounds flows, and resolves 4,000
+  through chains of random edits from both solvers' earlier solutions.
 - `tools/compare.py` runs the solvers against a C++ build of LEMON
   (`tools/lemon-ref`) on generated instances and on the benchmark suite.
 - `tools/ab_builds.py` compares two builds of `solve_dimacs`, by interleaved
